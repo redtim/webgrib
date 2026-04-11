@@ -223,6 +223,13 @@ export interface WindParticleLayerOptions {
   dropRate?: number;
   dropRateBump?: number;
   fade?: number;          // 0..1 — higher = longer trails
+  /**
+   * Pin the colormap's value range (in the same units as the wind field —
+   * m/s for HRRR) instead of auto-deriving it from the field's dynamic max.
+   * Use this to keep color bands aligned to a fixed scale across frames,
+   * e.g. pinning to `[0, 30.87]` gives a 0–60 kt Windy-style palette.
+   */
+  speedRange?: [number, number];
 }
 
 export class WindParticleLayer implements CustomLayerInterface {
@@ -266,6 +273,7 @@ export class WindParticleLayer implements CustomLayerInterface {
   private particleCols = 256;
   private particleRows = 256;
   private speedRange: [number, number] = [0, 30];
+  private pinnedSpeedRange: [number, number] | null = null;
   private speedFactor: number;
   private dropRate: number;
   private dropRateBump: number;
@@ -284,6 +292,10 @@ export class WindParticleLayer implements CustomLayerInterface {
     this.fade = opts.fade ?? 0.94;
     this.opacity = opts.opacity ?? 0.85;
     this.cmapName = opts.colormap ?? 'turbo';
+    if (opts.speedRange) {
+      this.pinnedSpeedRange = [opts.speedRange[0], opts.speedRange[1]];
+      this.speedRange = [opts.speedRange[0], opts.speedRange[1]];
+    }
   }
 
   onAdd(map: MlMap, glAny: WebGL2RenderingContext | WebGLRenderingContext): void {
@@ -361,7 +373,12 @@ export class WindParticleLayer implements CustomLayerInterface {
     if (this.windTex) this.gl.deleteTexture(this.windTex.tex);
     this.windTex = createVectorTexture(this.gl, u.nx, u.ny, uv);
     this.lcc = computeLccUniforms(grid);
-    this.speedRange = [0, Math.max(1, maxSpeed)];
+    // Honor an externally-pinned range (e.g. a knots-scaled palette) so the
+    // color bands stay stable across frames; otherwise fall back to the
+    // field's dynamic maximum.
+    this.speedRange = this.pinnedSpeedRange
+      ? [this.pinnedSpeedRange[0], this.pinnedSpeedRange[1]]
+      : [0, Math.max(1, maxSpeed)];
     this.uValues = u.values;
     this.vValues = v.values;
     this.windNx = u.nx;
@@ -374,6 +391,20 @@ export class WindParticleLayer implements CustomLayerInterface {
     this.map?.triggerRepaint();
   }
   isVisible(): boolean { return this.visible; }
+
+  /**
+   * Pin the speed range used to index the colormap (in field units — m/s
+   * for HRRR). Pass `null` to revert to auto-deriving from the field max.
+   */
+  setSpeedRange(range: [number, number] | null): void {
+    if (range) {
+      this.pinnedSpeedRange = [range[0], range[1]];
+      this.speedRange = [range[0], range[1]];
+    } else {
+      this.pinnedSpeedRange = null;
+    }
+    this.map?.triggerRepaint();
+  }
 
   /**
    * Sample the wind (u, v) at a geographic point via bilinear interpolation,
