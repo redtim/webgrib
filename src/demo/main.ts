@@ -172,23 +172,23 @@ async function main(): Promise<void> {
 
   const map = new maplibregl.Map({
     container: 'map',
-    style: {
-      version: 8,
-      sources: {
-        basemap: {
-          type: 'raster',
-          tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-          tileSize: 256,
-          attribution: '© OpenStreetMap contributors © CARTO',
-        },
-      },
-      layers: [{ id: 'basemap', type: 'raster', source: 'basemap' }],
-    },
+    // OpenFreeMap dark — free, no key, no rate limits, community-funded.
+    // Published under OSM/OpenMapTiles licensing; attribution is pulled
+    // automatically from the style JSON into MapLibre's attribution control.
+    style: 'https://tiles.openfreemap.org/styles/dark',
     center: [-96, 38],
     zoom: 3.5,
     minZoom: 2,
     maxZoom: 10,
     hash: true,
+  });
+
+  // OpenFreeMap is community-funded; log fetch/tile failures rather than
+  // crash the page. Custom data layers keep rendering even if individual
+  // basemap tiles fail to load.
+  map.on('error', (e) => {
+    // eslint-disable-next-line no-console
+    console.warn('MapLibre error:', e.error ?? e);
   });
 
   // Track the label of the currently-loaded scalar preset so the click popup
@@ -205,8 +205,70 @@ async function main(): Promise<void> {
   const client = new DecodeClient();
 
   await new Promise<void>((r) => map.once('load', () => r()));
-  map.addLayer(scalarLayer);
-  map.addLayer(windLayer);
+
+  // Find a stable insertion point in the vector style so custom data layers
+  // render over land/water fills but UNDER roads, boundaries, labels, and our
+  // coastline stroke. Preference order follows OpenMapTiles schema source
+  // layers: transportation (roads) → boundary → place labels. If none match
+  // (e.g. a barebones style), `undefined` falls back to appending on top —
+  // not ideal visually but non-fatal.
+  const findInsertionPoint = (): string | undefined => {
+    const layers = map.getStyle().layers ?? [];
+    for (const sl of ['transportation', 'boundary', 'place'] as const) {
+      const found = layers.find(
+        (l) => (l as { 'source-layer'?: string })['source-layer'] === sl,
+      );
+      if (found) return found.id;
+    }
+    return undefined;
+  };
+  const beforeId = findInsertionPoint();
+
+  map.addLayer(scalarLayer, beforeId);
+  map.addLayer(windLayer, beforeId);
+
+  // Explicit coastline stroke — OpenMapTiles has no dedicated coastline
+  // source layer; the water polygon edge IS the coastline. Adding a thin
+  // line layer reading the same `water` source-layer gives us a crisp
+  // reference stroke drawn ON TOP of the data layers but below roads.
+  // Added AFTER the custom layers with the same beforeId so it stacks
+  // between them and `firstRoad`.
+  map.addLayer(
+    {
+      id: 'ofm-coastline',
+      type: 'line',
+      source: 'openmaptiles',
+      'source-layer': 'water',
+      paint: {
+        'line-color': '#5c6b7f',
+        'line-width': 0.8,
+        'line-opacity': 0.9,
+      },
+    },
+    beforeId,
+  );
+
+  // Dim the basemap road network so it acts as subtle geographic context
+  // rather than competing with the weather data. OpenFreeMap's dark style
+  // draws roads at full opacity by default; we walk every layer backed by
+  // the `transportation` (or `transportation_name`) source-layer and
+  // override its opacity. Line layers get a very low `line-opacity`; road
+  // label symbols get a slightly higher `text-opacity` so major highway
+  // shields remain legible for orientation.
+  const dimTransportationLayers = (): void => {
+    const layers = map.getStyle().layers ?? [];
+    for (const layer of layers) {
+      const sl = (layer as { 'source-layer'?: string })['source-layer'];
+      if (!sl || !sl.startsWith('transportation')) continue;
+      if (layer.type === 'line') {
+        map.setPaintProperty(layer.id, 'line-opacity', 0.22);
+      } else if (layer.type === 'symbol') {
+        try { map.setPaintProperty(layer.id, 'text-opacity', 0.45); } catch { /* some styles lack text */ }
+        try { map.setPaintProperty(layer.id, 'icon-opacity', 0.45); } catch { /* some styles lack icons */ }
+      }
+    }
+  };
+  dimTransportationLayers();
 
   // ---- layer visibility toggles -------------------------------------------
 
@@ -215,7 +277,9 @@ async function main(): Promise<void> {
   const syncToggle = (el: HTMLInputElement, layerId: string, layer: ScalarFieldLayer | WindParticleLayer): void => {
     el.addEventListener('change', () => {
       if (el.checked) {
-        if (!hasLayer(layerId)) map.addLayer(layer);
+        // Re-add with the same beforeId we used initially so z-order is
+        // preserved across toggle cycles.
+        if (!hasLayer(layerId)) map.addLayer(layer, beforeId);
         layer.setVisible(true);
       } else {
         layer.setVisible(false);
@@ -301,7 +365,7 @@ async function main(): Promise<void> {
           level: preset.scalar.level,
           forecast: fhour === 0 ? /^anl$/ : new RegExp(`^${fhour} hour fcst$`),
         });
-        if (!hasLayer('hrrr-scalar')) map.addLayer(scalarLayer);
+        if (!hasLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
         toggleScalarEl.checked = true;
         toggleScalarEl.disabled = false;
         removeScalarBtn.disabled = false;
@@ -318,7 +382,7 @@ async function main(): Promise<void> {
           { parameter: preset.wind.uParam, level: preset.wind.level, forecast: fcRe },
           { parameter: preset.wind.vParam, level: preset.wind.level, forecast: fcRe },
         );
-        if (!hasLayer('hrrr-wind')) map.addLayer(windLayer);
+        if (!hasLayer('hrrr-wind')) map.addLayer(windLayer, beforeId);
         toggleWindEl.checked = true;
         toggleWindEl.disabled = false;
         removeWindBtn.disabled = false;

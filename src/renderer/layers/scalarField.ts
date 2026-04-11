@@ -304,7 +304,20 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0);
+
+    // Restore MapLibre-expected GL state. MapLibre's custom-layer contract
+    // requires us not to leave blending/depth/stencil/culling in an
+    // unexpected state, and the default blending mode is premultiplied
+    // alpha (`ONE, ONE_MINUS_SRC_ALPHA`). Any vector layers drawn after
+    // this custom layer (roads, labels, the coastline stroke) will
+    // composite incorrectly without this reset.
     gl.bindVertexArray(null);
+    gl.useProgram(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   }
 
   onRemove(_map: MlMap, glAny: WebGL2RenderingContext | WebGLRenderingContext): void {

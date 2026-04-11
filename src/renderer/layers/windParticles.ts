@@ -493,6 +493,19 @@ export class WindParticleLayer implements CustomLayerInterface {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 
+    // Restore MapLibre-expected GL state. We rebind the default program,
+    // VAO, buffers, textures, and blend func. Without this, subsequent
+    // vector layers (roads, labels, coastline stroke) composite incorrectly
+    // because we leave `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` dirty instead of
+    // the premultiplied-alpha setup MapLibre uses internally.
+    gl.bindVertexArray(null);
+    gl.useProgram(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+
     // Swap ping-pong buffers for next frame
     [this.particleTexA, this.particleTexB] = [this.particleTexB, this.particleTexA];
     [this.trailsTexA, this.trailsTexB] = [this.trailsTexB, this.trailsTexA];
