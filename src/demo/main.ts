@@ -31,6 +31,19 @@ const setStatus = (text: string, error = false): void => {
 
 async function main(): Promise<void> {
   const panelRoot = document.getElementById('panel')!;
+  const timelineBar = document.getElementById('timeline-bar')!;
+  const panelToggle = document.getElementById('panel-toggle')!;
+
+  // Panel show/hide
+  let panelVisible = true;
+  panelToggle.textContent = '\u25C0';
+  panelToggle.addEventListener('click', () => {
+    panelVisible = !panelVisible;
+    panelRoot.classList.toggle('hidden', !panelVisible);
+    timelineBar.classList.toggle('panel-hidden', !panelVisible);
+    panelToggle.classList.toggle('collapsed', !panelVisible);
+    panelToggle.textContent = panelVisible ? '\u25C0' : '\u25B6';
+  });
 
   const map = new maplibregl.Map({
     container: 'map',
@@ -74,7 +87,7 @@ async function main(): Promise<void> {
   const legend = new Legend(panelRoot);
 
   const timeline = new Timeline({
-    parent: panelRoot,
+    parent: timelineBar,
     onChange: (_cycle, _fhour) => {
       if (currentVariable && !loading) {
         void loadLevel(currentVariable, levelSlider.index, _cycle, _fhour);
