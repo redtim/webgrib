@@ -199,6 +199,14 @@ export const CATALOG: CatalogVariable[] = [
     levels: [scalarLevel('Surface', /^VIS$/, /^surface$/)],
   },
 
+  // Lightning
+  {
+    id: 'lightning', group: 'Lightning', label: 'Lightning Threat', kind: 'scalar',
+    colormap: 'lightning', unit: 'fl/hr',
+    format: (v: number) => `${v.toFixed(1)} flashes/hr`,
+    levels: [scalarLevel('Entire Atm', /^LTNG$/, /^entire atmosphere$/)],
+  },
+
   // Other
   {
     id: 'vvel', group: 'Other', label: 'Vertical Velocity', kind: 'scalar',

@@ -10,7 +10,7 @@
  * It creates its own <canvas> and appends it to the map's canvas container.
  */
 
-import type { Map as MlMap, LngLat } from 'maplibre-gl';
+import type { Map as MlMap } from 'maplibre-gl';
 
 export interface LightningLayerOptions {
   /** Max age in ms before a strike is removed. Default 10 minutes. */
@@ -196,47 +196,61 @@ export class LightningLayer {
     ctx.clearRect(0, 0, w, h);
 
     const now = Date.now();
-    // Prune old strikes
     this.strikes = this.strikes.filter((s) => now - s.time < this.maxAge);
 
     for (const s of this.strikes) {
       const age = now - s.time;
-      const t = age / this.maxAge; // 0 = just arrived, 1 = about to expire
+      const t = age / this.maxAge; // 0 = fresh, 1 = expiring
 
       const pt = map.project([s.lon, s.lat]);
       const x = pt.x;
       const y = pt.y;
-
-      // Skip off-screen
       if (x < -20 || x > w + 20 || y < -20 || y > h + 20) continue;
 
-      // Flash effect: bright and large when new, dim small dot when old
-      const alpha = Math.max(0, 1 - t * t); // quadratic fade
-      const radius = this.flashRadius * (t < 0.05 ? 1 + (1 - t / 0.05) * 2 : 1 - t * 0.5);
+      // Age color scale: white → yellow → orange → red → dark grey
+      const color = ageColor(t);
+      const alpha = Math.max(0.08, 1 - t * t);
 
-      // Color: white/yellow flash for new, dimmer for old. Positive polarity = red tint.
-      const isPositive = s.pol > 0;
+      // Scale: bolts shrink slightly as they age
+      const scale = this.flashRadius / 10 * (1 - t * 0.4);
 
-      if (t < 0.03) {
-        // Initial bright flash — radial glow
-        const glow = ctx.createRadialGradient(x, y, 0, x, y, radius * 4);
-        glow.addColorStop(0, isPositive ? `rgba(255,180,100,${alpha})` : `rgba(220,230,255,${alpha})`);
+      // Initial flash glow for very new strikes
+      if (t < 0.04) {
+        const glowR = this.flashRadius * 3 * (1 - t / 0.04);
+        const glow = ctx.createRadialGradient(x, y, 0, x, y, glowR);
+        glow.addColorStop(0, `rgba(255,255,240,${0.7 * (1 - t / 0.04)})`);
         glow.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = glow;
         ctx.beginPath();
-        ctx.arc(x, y, radius * 4, 0, Math.PI * 2);
+        ctx.arc(x, y, glowR, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      // Core dot
+      // Draw lightning bolt SVG shape
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = color;
+      ctx.strokeStyle = `rgba(0,0,0,${alpha * 0.4})`;
+      ctx.lineWidth = 0.6 / scale;
       ctx.beginPath();
-      ctx.arc(x, y, Math.max(1, radius), 0, Math.PI * 2);
-      if (isPositive) {
-        ctx.fillStyle = `rgba(255,140,60,${alpha * 0.9})`;
-      } else {
-        ctx.fillStyle = `rgba(200,210,255,${alpha * 0.9})`;
-      }
+      // Bolt shape: tip at bottom (0,8), top at (0,-8), zig-zag
+      ctx.moveTo(1, -8);
+      ctx.lineTo(-2, -1);
+      ctx.lineTo(0.5, -1);
+      ctx.lineTo(-1.5, 3);
+      ctx.lineTo(1, 3);
+      ctx.lineTo(-1, 8);
+      ctx.lineTo(3, 1);
+      ctx.lineTo(0.5, 1);
+      ctx.lineTo(3, -3);
+      ctx.lineTo(0.5, -3);
+      ctx.lineTo(3, -8);
+      ctx.closePath();
       ctx.fill();
+      ctx.stroke();
+      ctx.restore();
     }
   }
 
@@ -256,6 +270,29 @@ export class LightningLayer {
   private onResize = (): void => {
     this.syncCanvasSize();
   };
+}
+
+/**
+ * Maps strike age (0 = just arrived, 1 = expiring) to a color string.
+ * Gradient: bright white → yellow → orange → red → dark grey.
+ */
+function ageColor(t: number): string {
+  // 5-stop gradient sampled linearly
+  const stops: [number, number, number][] = [
+    [255, 255, 255], // 0.00 — white
+    [255, 240, 80],  // 0.25 — yellow
+    [255, 160, 40],  // 0.50 — orange
+    [220, 60, 40],   // 0.75 — red
+    [90, 90, 100],   // 1.00 — dark grey
+  ];
+  const idx = Math.min(t, 0.999) * (stops.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.min(lo + 1, stops.length - 1);
+  const f = idx - lo;
+  const r = Math.round(stops[lo]![0] * (1 - f) + stops[hi]![0] * f);
+  const g = Math.round(stops[lo]![1] * (1 - f) + stops[hi]![1] * f);
+  const b = Math.round(stops[lo]![2] * (1 - f) + stops[hi]![2] * f);
+  return `rgb(${r},${g},${b})`;
 }
 
 /** LZW decompressor for Blitzortung's compressed websocket messages. */

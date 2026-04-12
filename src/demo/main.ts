@@ -147,15 +147,14 @@ async function main(): Promise<void> {
   // ---- lightning toggle ------------------------------------------------------
 
   const ltToggle = document.createElement('div');
-  ltToggle.className = 'layer-group';
   ltToggle.style.marginTop = '8px';
   ltToggle.style.borderTop = '1px solid #30363d';
   ltToggle.style.paddingTop = '6px';
   ltToggle.innerHTML = `
     <label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 6px;font-size:11px;">
-      <input type="checkbox" id="toggle-lightning" checked />
+      <input type="checkbox" id="toggle-lightning" checked style="margin:0" />
       <span class="layer-kind" style="background:#3d2d1f;color:#ffcf57;width:16px;height:16px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;flex-shrink:0">&#9889;</span>
-      <span>Lightning <span id="lightning-count" style="color:#8b949e;font-size:10px"></span></span>
+      <span>Live Lightning <span id="lightning-count" style="color:#8b949e;font-size:10px"></span></span>
     </label>`;
   panelRoot.appendChild(ltToggle);
 

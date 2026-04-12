@@ -72,8 +72,8 @@ void main() {
 
   float t = (v - uValueRange.x) / max(1e-8, uValueRange.y - uValueRange.x);
   t = clamp(t, 0.0, 1.0);
-  vec3 color = texture(uLut, vec2(t, 0.5)).rgb;
-  outColor = vec4(color, uOpacity);
+  vec4 lut = texture(uLut, vec2(t, 0.5));
+  outColor = vec4(lut.rgb, lut.a * uOpacity);
 }
 `;
 
