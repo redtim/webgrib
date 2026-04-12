@@ -75,7 +75,7 @@ export const CATALOG: CatalogVariable[] = [
   // Temperature
   {
     id: 'temperature', group: 'Temperature', label: 'Temperature', kind: 'scalar',
-    colormap: 'temperature', unit: '°F', format: fmtTemp,
+    colormap: 'temperature', range: [203, 320], unit: '°F', format: fmtTemp,
     levels: [
       scalarLevel('2m', /^TMP$/, /^2 m above ground$/),
       scalarLevel('850 hPa', /^TMP$/, /^850 mb$/),
@@ -113,7 +113,7 @@ export const CATALOG: CatalogVariable[] = [
   // Moisture
   {
     id: 'dewpoint', group: 'Moisture', label: 'Dew Point', kind: 'scalar',
-    colormap: 'temperature', unit: '°F', format: fmtTemp,
+    colormap: 'temperature', range: [203, 320], unit: '°F', format: fmtTemp,
     levels: [
       scalarLevel('2m', /^DPT$/, /^2 m above ground$/),
     ],
@@ -141,7 +141,7 @@ export const CATALOG: CatalogVariable[] = [
   },
   {
     id: 'lftx', group: 'Instability', label: 'Lifted Index', kind: 'scalar',
-    colormap: 'temperature', range: [-10, 10], unit: '°C', format: fmtTempC,
+    colormap: 'turbo', range: [-10, 10], unit: '°C', format: fmtTempC,
     levels: [scalarLevel('500-1000mb', /^LFTX$/, /^500-1000 mb$/)],
   },
   {
@@ -212,7 +212,7 @@ export const CATALOG: CatalogVariable[] = [
   // Other
   {
     id: 'vvel', group: 'Other', label: 'Vertical Velocity', kind: 'scalar',
-    colormap: 'temperature', range: [-10, 10], unit: 'Pa/s', format: fmtPas,
+    colormap: 'turbo', range: [-10, 10], unit: 'Pa/s', format: fmtPas,
     levels: [
       scalarLevel('850 hPa', /^VVEL$/, /^850 mb$/),
       scalarLevel('700 hPa', /^VVEL$/, /^700 mb$/),

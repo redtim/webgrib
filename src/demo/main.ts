@@ -159,20 +159,42 @@ async function main(): Promise<void> {
       type: 'line',
       source: 'openmaptiles',
       'source-layer': 'water',
-      paint: { 'line-color': '#5c6b7f', 'line-width': 0.8, 'line-opacity': 0.9 },
+      paint: { 'line-color': '#3d4d60', 'line-width': 1.8, 'line-opacity': 1.0 },
     },
     beforeId,
   );
 
-  // Dim roads
+  // Restyle base map layers for weather overlay readability
   for (const layer of map.getStyle().layers ?? []) {
     const sl = (layer as { 'source-layer'?: string })['source-layer'];
-    if (!sl || !sl.startsWith('transportation')) continue;
-    if (layer.type === 'line') {
-      map.setPaintProperty(layer.id, 'line-opacity', 0.22);
-    } else if (layer.type === 'symbol') {
-      try { map.setPaintProperty(layer.id, 'text-opacity', 0.45); } catch { /* */ }
-      try { map.setPaintProperty(layer.id, 'icon-opacity', 0.45); } catch { /* */ }
+    if (!sl) continue;
+
+    // Dim roads — near-invisible uniform treatment
+    if (sl.startsWith('transportation')) {
+      if (layer.type === 'line') {
+        try { map.setPaintProperty(layer.id, 'line-opacity', 0.05); } catch { /* */ }
+      } else if (layer.type === 'symbol') {
+        try { map.setPaintProperty(layer.id, 'text-opacity', 0.1); } catch { /* */ }
+        try { map.setPaintProperty(layer.id, 'icon-opacity', 0.1); } catch { /* */ }
+      }
+    }
+
+    // Place names — clean, legible labels; only show significant places
+    if (sl === 'place' && layer.type === 'symbol') {
+      try { map.setPaintProperty(layer.id, 'text-color', '#e0e6ed'); } catch { /* */ }
+      try { map.setPaintProperty(layer.id, 'text-halo-color', 'rgba(0,0,0,0.7)'); } catch { /* */ }
+      try { map.setPaintProperty(layer.id, 'text-halo-width', 1.5); } catch { /* */ }
+      try { map.setPaintProperty(layer.id, 'text-halo-blur', 1); } catch { /* */ }
+      try { map.setLayoutProperty(layer.id, 'text-font', ['Noto Sans Regular']); } catch { /* */ }
+      try { map.setPaintProperty(layer.id, 'text-opacity', 0.9); } catch { /* */ }
+      // Only keep cities — hide villages, towns, suburbs, etc.
+      const id = layer.id.toLowerCase();
+      if (id.includes('village') || id.includes('suburb') || id.includes('hamlet')
+          || id.includes('quarter') || id.includes('neighbourhood') || id.includes('isolated')) {
+        try { map.setLayoutProperty(layer.id, 'visibility', 'none'); } catch { /* */ }
+      } else if (id.includes('town')) {
+        try { map.setLayerZoomRange(layer.id, 8, 24); } catch { /* */ }
+      }
     }
   }
 

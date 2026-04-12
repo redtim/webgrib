@@ -25,7 +25,7 @@ export function colormap(name: ColormapName): Uint8Array {
     }
     case 'inferno': return buildFromStops(INFERNO_STOPS);
     case 'grayscale': return buildFromStops([[0, 0, 0], [255, 255, 255]]);
-    case 'temperature': return buildFromStops(TEMP_STOPS);
+    case 'temperature': return buildFromPositionedStops(TEMP_STOPS);
     case 'wind': return buildFromPositionedStops(WIND_STOPS);
     case 'precipitation': {
       const lut = buildFromStops(PRECIP_STOPS);
@@ -107,9 +107,23 @@ const INFERNO_STOPS: Array<[number, number, number]> = [
   [0, 0, 4], [31, 12, 72], [85, 15, 109], [136, 34, 106],
   [186, 54, 85], [227, 89, 51], [249, 140, 10], [252, 198, 38], [252, 255, 164],
 ];
-const TEMP_STOPS: Array<[number, number, number]> = [
-  [15, 15, 85], [30, 60, 180], [90, 150, 230], [190, 220, 240],
-  [255, 240, 180], [255, 180, 80], [210, 70, 30], [120, 0, 0],
+// Temperature palette — exact RGB stops keyed by Kelvin.
+const TEMP_MIN_K = 203;
+const TEMP_MAX_K = 320;
+const TEMP_STOPS: Array<{ t: number; rgb: [number, number, number] }> = [
+  { t: (203    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [115, 70, 105] },  // 203 K = -70°C
+  { t: (218    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [202, 172, 195] }, // 218 K = -55°C
+  { t: (233    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [162, 70, 145] },  // 233 K = -40°C
+  { t: (248    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [143, 89, 169] },  // 248 K = -25°C
+  { t: (258    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [157, 219, 217] }, // 258 K = -15°C
+  { t: (265    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [106, 191, 181] }, // 265 K =  -8°C
+  { t: (269    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [100, 166, 189] }, // 269 K =  -4°C
+  { t: (273.15 - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [93, 133, 198] },  // 273 K =   0°C
+  { t: (274    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [68, 125, 99] },   // 274 K =   1°C
+  { t: (283    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [128, 147, 24] },  // 283 K =  10°C
+  { t: (294    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [243, 183, 4] },   // 294 K =  21°C
+  { t: (303    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [232, 83, 25] },   // 303 K =  30°C
+  { t: (320    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [71, 14, 0] },     // 320 K =  47°C
 ];
 // Wind palette — exact RGB stops keyed by m/s. Positions are fractions of the
 // display range (WIND_MAX_MS). Data from GRIB is already in m/s.
