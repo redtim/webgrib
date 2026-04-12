@@ -15,7 +15,7 @@ import type { Map as MlMap } from 'maplibre-gl';
 export interface LightningLayerOptions {
   /** Max age in ms before a strike is removed. Default 10 minutes. */
   maxAge?: number;
-  /** Initial flash radius in CSS px. Default 6. */
+  /** Initial flash radius in CSS px. Default 10. */
   flashRadius?: number;
   /** Canvas opacity. Default 0.9. */
   opacity?: number;
@@ -47,7 +47,7 @@ export class LightningLayer {
 
   constructor(opts: LightningLayerOptions = {}) {
     this.maxAge = opts.maxAge ?? 10 * 60 * 1000;
-    this.flashRadius = opts.flashRadius ?? 6;
+    this.flashRadius = opts.flashRadius ?? 10;
     this.wsUrl = opts.wsUrl ?? 'wss://ws1.blitzortung.org/';
 
     this.canvas = document.createElement('canvas');
@@ -110,6 +110,24 @@ export class LightningLayer {
   /** Number of strikes currently held in the buffer. */
   get strikeCount(): number {
     return this.strikes.length;
+  }
+
+  /** Find the nearest strike within `radiusPx` of a screen point. */
+  hitTest(lng: number, lat: number, radiusPx = 20): { lat: number; lon: number; time: number; distPx: number } | null {
+    if (!this.map || !this.visible) return null;
+    const click = this.map.project([lng, lat]);
+    let best: Strike | null = null;
+    let bestDist = radiusPx;
+    for (const s of this.strikes) {
+      const pt = this.map.project([s.lon, s.lat]);
+      const d = Math.hypot(pt.x - click.x, pt.y - click.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = s;
+      }
+    }
+    if (!best) return null;
+    return { lat: best.lat, lon: best.lon, time: best.time, distPx: bestDist };
   }
 
   // ---------------------------------------------------------------- websocket
@@ -209,16 +227,19 @@ export class LightningLayer {
 
       // Age color scale: white → yellow → orange → red → dark grey
       const color = ageColor(t);
-      const alpha = Math.max(0.08, 1 - t * t);
+      const alpha = Math.max(0.15, 1 - t * t * 0.85);
 
       // Scale: bolts shrink slightly as they age
       const scale = this.flashRadius / 10 * (1 - t * 0.4);
 
-      // Initial flash glow for very new strikes
-      if (t < 0.04) {
-        const glowR = this.flashRadius * 3 * (1 - t / 0.04);
+      // Initial flash glow for new strikes (< 5s)
+      const ageMs = now - s.time;
+      if (ageMs < 5000) {
+        const glowFade = 1 - ageMs / 5000;
+        const glowR = this.flashRadius * 4 * glowFade;
         const glow = ctx.createRadialGradient(x, y, 0, x, y, glowR);
-        glow.addColorStop(0, `rgba(255,255,240,${0.7 * (1 - t / 0.04)})`);
+        glow.addColorStop(0, `rgba(255,255,220,${0.9 * glowFade})`);
+        glow.addColorStop(0.4, `rgba(255,240,100,${0.5 * glowFade})`);
         glow.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = glow;
         ctx.beginPath();
@@ -231,9 +252,9 @@ export class LightningLayer {
       ctx.translate(x, y);
       ctx.scale(scale, scale);
       ctx.globalAlpha = alpha;
-      ctx.fillStyle = color;
-      ctx.strokeStyle = `rgba(0,0,0,${alpha * 0.4})`;
-      ctx.lineWidth = 0.6 / scale;
+      ctx.fillStyle = `rgba(255,230,50,${alpha})`;
+      ctx.strokeStyle = `rgba(255,255,255,${alpha * 0.9})`;
+      ctx.lineWidth = 1.2 / scale;
       ctx.beginPath();
       // Bolt shape: tip at bottom (0,8), top at (0,-8), zig-zag
       ctx.moveTo(1, -8);

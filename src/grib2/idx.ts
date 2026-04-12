@@ -106,7 +106,7 @@ export async function fetchMessageBytes(
   const records = await fetchIdx(idxUrl, opts);
   const hit = findRecord(records, query);
   if (!hit) {
-    throw new Error(`No .idx record matched ${JSON.stringify(query)} (of ${records.length} records)`);
+    throw new Error(`No .idx record matched ${JSON.stringify(query, (_k, v) => v instanceof RegExp ? v.source : v)} (of ${records.length} records)`);
   }
   const dataUrl = (opts.dataUrlFor ?? ((u) => u.replace(/\.idx$/, '')))(idxUrl);
   const start = hit.byteOffset;
@@ -136,6 +136,13 @@ export async function fetchMessageBytes(
  */
 export function forecastQuery(fhour: number): RegExp {
   return fhour === 0 ? /^anl$/ : new RegExp(`^${fhour} hour fcst$`);
+}
+
+/** Forecast regex for 1-hour accumulated fields (APCP, etc.). */
+export function accForecastQuery(fhour: number): RegExp {
+  if (fhour <= 0) return /^0-0 day acc fcst$/;
+  if (fhour === 1) return /^0-1 hour acc fcst$/;
+  return new RegExp(`^${fhour - 1}-${fhour} hour acc fcst$`);
 }
 
 export function hrrrUrls(cycle: string, fhour: number, product: 'wrfsfcf' | 'wrfprsf' | 'wrfnatf' | 'wrfsubhf' = 'wrfsfcf'): { data: string; idx: string } {

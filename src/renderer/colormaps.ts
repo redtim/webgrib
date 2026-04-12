@@ -8,20 +8,41 @@
 export type ColormapName =
   | 'viridis' | 'turbo' | 'inferno' | 'grayscale'
   | 'temperature' | 'wind'
-  | 'precipitation' | 'humidity' | 'cape' | 'cloud' | 'snow'
+  | 'precipitation' | 'humidity' | 'cape' | 'cin' | 'cloud' | 'snow'
   | 'lightning';
 
 export function colormap(name: ColormapName): Uint8Array {
   switch (name) {
-    case 'viridis': return buildFromStops(VIRIDIS_STOPS);
-    case 'turbo': return buildFromStops(TURBO_STOPS);
+    case 'viridis': {
+      const lut = buildFromStops(VIRIDIS_STOPS);
+      lut[3] = 0; // index 0 (lowest value) = fully transparent
+      return lut;
+    }
+    case 'turbo': {
+      const lut = buildFromStops(TURBO_STOPS);
+      lut[3] = 0; // index 0 (lowest value) = fully transparent
+      return lut;
+    }
     case 'inferno': return buildFromStops(INFERNO_STOPS);
     case 'grayscale': return buildFromStops([[0, 0, 0], [255, 255, 255]]);
     case 'temperature': return buildFromStops(TEMP_STOPS);
     case 'wind': return buildFromStops(WIND_STOPS);
-    case 'precipitation': return buildFromStops(PRECIP_STOPS);
+    case 'precipitation': {
+      const lut = buildFromStops(PRECIP_STOPS);
+      lut[3] = 0; // index 0 (value 0.0) = fully transparent
+      return lut;
+    }
     case 'humidity': return buildFromStops(HUMIDITY_STOPS);
-    case 'cape': return buildFromStops(CAPE_STOPS);
+    case 'cape': {
+      const lut = buildFromStops(CAPE_STOPS);
+      lut[3] = 0; // index 0 (value 0) = fully transparent
+      return lut;
+    }
+    case 'cin': {
+      const lut = buildFromStops(CAPE_STOPS);
+      lut[255 * 4 + 3] = 0; // index 255 (value 0) = fully transparent
+      return lut;
+    }
     case 'cloud': return buildFromStops(CLOUD_STOPS);
     case 'snow': return buildFromStops(SNOW_STOPS);
     case 'lightning': {

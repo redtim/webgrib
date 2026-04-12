@@ -214,10 +214,20 @@ async function main(): Promise<void> {
 
     try {
       if (variable.kind === 'scalar' && level.query) {
+        const layerFcRe = level.query.forecast?.(fhour) ?? fcRe;
+        // Accumulated fields have no data at analysis time (fhour 0)
+        if (level.query.forecast && fhour === 0) {
+          scalarLayer.setVisible(false);
+          windLayer.setVisible(false);
+          legend.hide();
+          setStatus(`${displayName} — no data at analysis hour`);
+          loading = false;
+          return;
+        }
         const { field, grid } = await client.decode(urls.idx, {
           parameter: level.query.parameter,
           level: level.query.level,
-          forecast: fcRe,
+          forecast: layerFcRe,
         });
         if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
         scalarLayer.setVisible(true);
@@ -339,6 +349,19 @@ async function main(): Promise<void> {
         rows.push(`<div class="inspect-row"><span class="k">speed</span><span>${w.speed.toFixed(1)} m/s  (${(w.speed * 2.237).toFixed(1)} mph)</span></div>`);
         rows.push(`<div class="inspect-row"><span class="k">from</span><span>${compassFromBearing(w.directionDeg)} (${w.directionDeg.toFixed(0)}\u00B0)</span></div>`);
         rows.push(`<div class="inspect-row"><span class="k">u / v</span><span>${w.u.toFixed(1)} / ${w.v.toFixed(1)}</span></div>`);
+      }
+    }
+
+    // Lightning strike readout
+    if (lightningLayer.isAttached() && lightningLayer.isVisible()) {
+      const hit = lightningLayer.hitTest(lng, lat);
+      if (hit) {
+        const ago = Math.round((Date.now() - hit.time) / 1000);
+        const agoStr = ago < 60 ? `${ago}s ago` : `${Math.floor(ago / 60)}m ${ago % 60}s ago`;
+        if (rows.length) rows.push('<div style="height:4px"></div>');
+        rows.push(`<div class="inspect-title" style="color:#ffcf57">&#9889; Lightning Strike</div>`);
+        rows.push(`<div class="inspect-row"><span class="k">time</span><span>${agoStr}</span></div>`);
+        rows.push(`<div class="inspect-row"><span class="k">location</span><span>${hit.lon.toFixed(3)}, ${hit.lat.toFixed(3)}</span></div>`);
       }
     }
 

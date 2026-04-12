@@ -5,12 +5,14 @@
  */
 
 import type { ColormapName } from './colormaps.js';
+import { accForecastQuery } from '../grib2/idx.js';
 
 export type LayerKind = 'scalar' | 'wind';
 
 export interface LayerQuery {
   parameter: RegExp;
   level: RegExp;
+  forecast?: (fhour: number) => RegExp;
 }
 
 /** One atmospheric level within a variable. */
@@ -134,7 +136,7 @@ export const CATALOG: CatalogVariable[] = [
   },
   {
     id: 'cin', group: 'Instability', label: 'CIN', kind: 'scalar',
-    colormap: 'cape', range: [-500, 0], unit: 'J/kg', format: fmtJkg,
+    colormap: 'cin', range: [-500, 0], unit: 'J/kg', format: fmtJkg,
     levels: [scalarLevel('Surface', /^CIN$/, /^surface$/)],
   },
   {
@@ -152,7 +154,7 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'apcp', group: 'Precipitation', label: '1h Precipitation', kind: 'scalar',
     colormap: 'precipitation', range: [0, 50], unit: 'mm', format: fmtMm,
-    levels: [scalarLevel('Surface', /^APCP$/, /^surface$/)],
+    levels: [{ label: 'Surface', query: { parameter: /^APCP$/, level: /^surface$/, forecast: accForecastQuery } }],
   },
   {
     id: 'prate', group: 'Precipitation', label: 'Precip Rate', kind: 'scalar',
