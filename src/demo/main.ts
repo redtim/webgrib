@@ -1,113 +1,27 @@
 /**
- * Demo entry point. Wires a MapLibre map with a scalar HRRR layer and a
- * wind-particle layer, plus a tiny control panel to pick fields.
+ * Demo entry point. Wires a MapLibre map with HRRR weather layers driven
+ * by the catalog (variable + levels), a grouped picker panel, level slider,
+ * timeline control, and legend.
  *
- * HRRR lives on NOAA's S3 Open Data bucket:
- *   https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.YYYYMMDD/conus/hrrr.tHHz.wrfsfcfFF.grib2[.idx]
- *
- * The S3 bucket is CORS-enabled and supports Range requests, which is what
- * makes in-browser HRRR feasible.
+ * Keyboard shortcuts:
+ *   Left/Right arrow — step through forecast hours
+ *   Up/Down arrow    — step through atmospheric levels
  */
 
 import maplibregl from 'maplibre-gl';
-import { ScalarFieldLayer, WindyLayer } from '../renderer/index.js';
-import { hrrrUrls } from '../grib2/idx.js';
+import { ScalarFieldLayer, WindyLayer, LightningLayer } from '../renderer/index.js';
+import { hrrrUrls, forecastQuery } from '../grib2/idx.js';
 import { DecodeClient } from '../worker/client.js';
+import { CATALOG, findVariable } from '../renderer/catalog.js';
+import type { CatalogVariable, VariableLevel } from '../renderer/catalog.js';
+import { Panel } from './panel.js';
+import { Timeline } from './timeline.js';
+import { Legend } from './legend.js';
+import { LevelSlider } from './levelSlider.js';
 
-// A small catalog of interesting HRRR surface fields. Each preset carries its
-// own unit/format metadata so click-to-inspect can show human-readable values.
-interface FieldPreset {
-  key: string;
-  label: string;
-  kind: 'scalar' | 'wind';
-  scalar?: {
-    param: RegExp;
-    level: RegExp;
-    forecast?: RegExp;
-    colormap?: 'turbo' | 'viridis' | 'inferno' | 'temperature' | 'grayscale' | 'wind';
-    /** Convert the raw decoded value into the display unit for inspection. */
-    format: (raw: number) => string;
-  };
-  wind?: {
-    uParam: RegExp;
-    vParam: RegExp;
-    level: RegExp;
-    forecast?: RegExp;
-  };
-}
-
-const kelvinToF = (k: number): string => `${((k - 273.15) * 9 / 5 + 32).toFixed(1)} °F`;
-const metersToMi = (m: number): string => `${(m / 1609.344).toFixed(1)} mi`;
-
-// Wind palette is keyed in knots (Windy-style). HRRR fields are in m/s, so we
-// convert the desired knot range into m/s before handing it to layers.
+// Wind speed raster range: 0–60 kt mapped to m/s for the 'wind' colormap.
 const KT_TO_MS = 0.514444;
-const WIND_RANGE_KT: [number, number] = [0, 60];
-const WIND_RANGE_MS: [number, number] = [WIND_RANGE_KT[0] * KT_TO_MS, WIND_RANGE_KT[1] * KT_TO_MS];
-
-const PRESETS: FieldPreset[] = [
-  {
-    key: 't2m',
-    label: '2 m Temperature',
-    kind: 'scalar',
-    scalar: {
-      param: /^TMP$/,
-      level: /^2 m above ground$/,
-      colormap: 'temperature',
-      format: (v) => `${kelvinToF(v)}  (${v.toFixed(1)} K)`,
-    },
-  },
-  {
-    key: 'refc',
-    label: 'Composite Reflectivity',
-    kind: 'scalar',
-    scalar: {
-      param: /^REFC$/,
-      level: /entire atmosphere/,
-      colormap: 'turbo',
-      format: (v) => `${v.toFixed(1)} dBZ`,
-    },
-  },
-  {
-    key: 'gust',
-    label: 'Surface Wind Gust',
-    kind: 'scalar',
-    scalar: {
-      param: /^GUST$/,
-      level: /^surface$/,
-      colormap: 'wind',
-      format: (v) => `${(v / KT_TO_MS).toFixed(1)} kt  (${v.toFixed(1)} m/s)`,
-    },
-  },
-  {
-    key: 'tcdc',
-    label: 'Total Cloud Cover',
-    kind: 'scalar',
-    scalar: {
-      param: /^TCDC$/,
-      level: /entire atmosphere/,
-      colormap: 'grayscale',
-      format: (v) => `${v.toFixed(0)} %`,
-    },
-  },
-  {
-    key: 'vis',
-    label: 'Surface Visibility',
-    kind: 'scalar',
-    scalar: {
-      param: /^VIS$/,
-      level: /^surface$/,
-      colormap: 'viridis',
-      format: (v) => metersToMi(v),
-    },
-  },
-  {
-    key: 'wind10',
-    label: '10 m Wind (particles)',
-    kind: 'wind',
-    wind: { uParam: /^UGRD$/, vParam: /^VGRD$/, level: /^10 m above ground$/ },
-  },
-];
+const WIND_RANGE_MS: [number, number] = [0, 60 * KT_TO_MS];
 
 const setStatus = (text: string, error = false): void => {
   const el = document.getElementById('status')!;
@@ -115,113 +29,81 @@ const setStatus = (text: string, error = false): void => {
   el.classList.toggle('err', error);
 };
 
-function recentCycles(count = 6): string[] {
-  // HRRR cycles every hour on the hour, ~90 min latency. Walk back from "now
-  // minus 3 h" to be safe.
-  const now = new Date(Date.now() - 3 * 3600 * 1000);
-  const cycles: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const d = new Date(now.getTime() - i * 3600 * 1000);
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(d.getUTCDate()).padStart(2, '0');
-    const h = String(d.getUTCHours()).padStart(2, '0');
-    cycles.push(`${y}${m}${day}${h}`);
-  }
-  return cycles;
-}
-
-function populate<T>(select: HTMLSelectElement, items: T[], getValue: (t: T) => string, getLabel: (t: T) => string): void {
-  select.innerHTML = '';
-  for (const it of items) {
-    const opt = document.createElement('option');
-    opt.value = getValue(it);
-    opt.textContent = getLabel(it);
-    select.appendChild(opt);
-  }
-}
-
 async function main(): Promise<void> {
-  const fieldSel = document.getElementById('field') as HTMLSelectElement;
-  const cycleSel = document.getElementById('cycle') as HTMLSelectElement;
-  const fhourSel = document.getElementById('fhour') as HTMLSelectElement;
-  const loadBtn = document.getElementById('load') as HTMLButtonElement;
-  const toggleScalarEl = document.getElementById('toggle-scalar') as HTMLInputElement;
-  const toggleWindEl = document.getElementById('toggle-wind') as HTMLInputElement;
-  const removeScalarBtn = document.getElementById('remove-scalar') as HTMLButtonElement;
-  const removeWindBtn = document.getElementById('remove-wind') as HTMLButtonElement;
-
-  populate(fieldSel, PRESETS, (p) => p.key, (p) => p.label);
-  populate(cycleSel, recentCycles(), (c) => c, (c) => `${c.slice(0, 4)}-${c.slice(4, 6)}-${c.slice(6, 8)} ${c.slice(8, 10)}Z`);
-
-  // HRRR publishes every forecast hour up to the cycle's maximum. Standard
-  // cycles run to f18; the "extended" 00z/06z/12z/18z cycles run to f48.
-  // https://rapidrefresh.noaa.gov/hrrr/
-  const maxForecastHourForCycle = (cycleStr: string): number => {
-    const hh = Number(cycleStr.slice(8, 10));
-    return hh % 6 === 0 ? 48 : 18;
-  };
-  const rangeInclusive = (lo: number, hi: number): number[] => {
-    const out: number[] = [];
-    for (let i = lo; i <= hi; i++) out.push(i);
-    return out;
-  };
-  const syncFhourOptions = (): void => {
-    const max = maxForecastHourForCycle(cycleSel.value);
-    const prev = Number(fhourSel.value);
-    populate(fhourSel, rangeInclusive(0, max), (n) => String(n), (n) => `f${String(n).padStart(2, '0')}`);
-    // Preserve the previous selection if it's still valid, otherwise clamp.
-    fhourSel.value = String(prev >= 0 && prev <= max ? prev : Math.min(prev, max));
-  };
-  syncFhourOptions();
-  cycleSel.addEventListener('change', syncFhourOptions);
+  const panelRoot = document.getElementById('panel')!;
 
   const map = new maplibregl.Map({
     container: 'map',
-    // OpenFreeMap dark — free, no key, no rate limits, community-funded.
-    // Published under OSM/OpenMapTiles licensing; attribution is pulled
-    // automatically from the style JSON into MapLibre's attribution control.
     style: 'https://tiles.openfreemap.org/styles/dark',
     center: [-96, 38],
     zoom: 3.5,
     minZoom: 2,
     maxZoom: 10,
     hash: true,
+    keyboard: false,
   });
 
-  // OpenFreeMap is community-funded; log fetch/tile failures rather than
-  // crash the page. Custom data layers keep rendering even if individual
-  // basemap tiles fail to load.
   map.on('error', (e) => {
-    // eslint-disable-next-line no-console
     console.warn('MapLibre error:', e.error ?? e);
   });
 
-  // Track the label of the currently-loaded scalar preset so the click popup
-  // can show the right heading/formatter even after a different field gets
-  // loaded later.
-  let currentScalarPreset: FieldPreset | null = null;
-
-  // Layers are created once; addLayer/removeLayer from the map as toggled.
-  // Keeping them around across remove/re-add preserves their texture uploads
-  // (scalar) and resampled particle field (wind), so we don't re-download
-  // GRIB2 after removing.
+  // Layers are created once, reused across presets.
   const scalarLayer = new ScalarFieldLayer({ id: 'hrrr-scalar', colormap: 'turbo', opacity: 0.85 });
-  // WindyLayer is a DOM canvas overlay, not a MapLibre custom layer: it
-  // attaches to the map's canvas container directly via `attach(map)` and
-  // is tracked by `isAttached()` rather than `map.getLayer('hrrr-wind')`.
-  const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9 });
 
+  // Grey particle palette — subtle trails over the colored wind-speed raster.
+  const GREY_PARTICLES = [
+    'rgba(180,180,180,0.4)',
+    'rgba(190,190,190,0.5)',
+    'rgba(200,200,200,0.6)',
+    'rgba(210,210,210,0.7)',
+    'rgba(220,220,220,0.8)',
+    'rgba(230,230,230,0.85)',
+    'rgba(240,240,240,0.9)',
+    'rgba(245,245,245,0.95)',
+    'rgba(255,255,255,1.0)',
+  ];
+  const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9, colorScale: GREY_PARTICLES });
+  const lightningLayer = new LightningLayer();
   const client = new DecodeClient();
+
+  let currentVariable: CatalogVariable | null = null;
+  let loading = false;
+
+  // ---- UI components --------------------------------------------------------
+
+  const legend = new Legend(panelRoot);
+
+  const timeline = new Timeline({
+    parent: panelRoot,
+    onChange: (_cycle, _fhour) => {
+      if (currentVariable && !loading) {
+        void loadLevel(currentVariable, levelSlider.index, _cycle, _fhour);
+      }
+    },
+  });
+
+  const levelSlider = new LevelSlider({
+    parent: panelRoot,
+    onChange: (levelIndex) => {
+      if (currentVariable && !loading) {
+        void loadLevel(currentVariable, levelIndex, timeline.cycle, timeline.fhour);
+      }
+    },
+  });
+
+  const panel = new Panel({
+    parent: panelRoot,
+    onSelect: (variable) => {
+      currentVariable = variable;
+      levelSlider.setLevels(variable.levels);
+      void loadLevel(variable, 0, timeline.cycle, timeline.fhour);
+    },
+  });
+
+  // ---- map setup ------------------------------------------------------------
 
   await new Promise<void>((r) => map.once('load', () => r()));
 
-  // Find a stable insertion point in the vector style so custom data layers
-  // render over land/water fills but UNDER roads, boundaries, labels, and our
-  // coastline stroke. Preference order follows OpenMapTiles schema source
-  // layers: transportation (roads) → boundary → place labels. If none match
-  // (e.g. a barebones style), `undefined` falls back to appending on top —
-  // not ideal visually but non-fatal.
   const findInsertionPoint = (): string | undefined => {
     const layers = map.getStyle().layers ?? [];
     for (const sl of ['transportation', 'boundary', 'place'] as const) {
@@ -236,96 +118,169 @@ async function main(): Promise<void> {
 
   map.addLayer(scalarLayer, beforeId);
   windLayer.attach(map);
+  lightningLayer.attach(map);
 
-  // Explicit coastline stroke — OpenMapTiles has no dedicated coastline
-  // source layer; the water polygon edge IS the coastline. Adding a thin
-  // line layer reading the same `water` source-layer gives us a crisp
-  // reference stroke drawn ON TOP of the data layers but below roads.
-  // Added AFTER the custom layers with the same beforeId so it stacks
-  // between them and `firstRoad`.
+  // Coastline stroke
   map.addLayer(
     {
       id: 'ofm-coastline',
       type: 'line',
       source: 'openmaptiles',
       'source-layer': 'water',
-      paint: {
-        'line-color': '#5c6b7f',
-        'line-width': 0.8,
-        'line-opacity': 0.9,
-      },
+      paint: { 'line-color': '#5c6b7f', 'line-width': 0.8, 'line-opacity': 0.9 },
     },
     beforeId,
   );
 
-  // Dim the basemap road network so it acts as subtle geographic context
-  // rather than competing with the weather data. OpenFreeMap's dark style
-  // draws roads at full opacity by default; we walk every layer backed by
-  // the `transportation` (or `transportation_name`) source-layer and
-  // override its opacity. Line layers get a very low `line-opacity`; road
-  // label symbols get a slightly higher `text-opacity` so major highway
-  // shields remain legible for orientation.
-  const dimTransportationLayers = (): void => {
-    const layers = map.getStyle().layers ?? [];
-    for (const layer of layers) {
-      const sl = (layer as { 'source-layer'?: string })['source-layer'];
-      if (!sl || !sl.startsWith('transportation')) continue;
-      if (layer.type === 'line') {
-        map.setPaintProperty(layer.id, 'line-opacity', 0.22);
-      } else if (layer.type === 'symbol') {
-        try { map.setPaintProperty(layer.id, 'text-opacity', 0.45); } catch { /* some styles lack text */ }
-        try { map.setPaintProperty(layer.id, 'icon-opacity', 0.45); } catch { /* some styles lack icons */ }
+  // Dim roads
+  for (const layer of map.getStyle().layers ?? []) {
+    const sl = (layer as { 'source-layer'?: string })['source-layer'];
+    if (!sl || !sl.startsWith('transportation')) continue;
+    if (layer.type === 'line') {
+      map.setPaintProperty(layer.id, 'line-opacity', 0.22);
+    } else if (layer.type === 'symbol') {
+      try { map.setPaintProperty(layer.id, 'text-opacity', 0.45); } catch { /* */ }
+      try { map.setPaintProperty(layer.id, 'icon-opacity', 0.45); } catch { /* */ }
+    }
+  }
+
+  // ---- lightning toggle ------------------------------------------------------
+
+  const ltToggle = document.createElement('div');
+  ltToggle.className = 'layer-group';
+  ltToggle.style.marginTop = '8px';
+  ltToggle.style.borderTop = '1px solid #30363d';
+  ltToggle.style.paddingTop = '6px';
+  ltToggle.innerHTML = `
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 6px;font-size:11px;">
+      <input type="checkbox" id="toggle-lightning" checked />
+      <span class="layer-kind" style="background:#3d2d1f;color:#ffcf57;width:16px;height:16px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;flex-shrink:0">&#9889;</span>
+      <span>Lightning <span id="lightning-count" style="color:#8b949e;font-size:10px"></span></span>
+    </label>`;
+  panelRoot.appendChild(ltToggle);
+
+  const ltCheckbox = document.getElementById('toggle-lightning') as HTMLInputElement;
+  const ltCount = document.getElementById('lightning-count')!;
+  ltCheckbox.addEventListener('change', () => {
+    lightningLayer.setVisible(ltCheckbox.checked);
+  });
+  // Update strike count periodically
+  setInterval(() => {
+    const n = lightningLayer.strikeCount;
+    ltCount.textContent = n > 0 ? `(${n})` : '';
+  }, 2000);
+
+  // ---- load a variable at a specific level ----------------------------------
+
+  async function loadLevel(
+    variable: CatalogVariable,
+    levelIndex: number,
+    cycle: string,
+    fhour: number,
+  ): Promise<void> {
+    if (loading) return;
+    loading = true;
+    currentVariable = variable;
+    panel.setActive(variable.id);
+
+    const level = variable.levels[levelIndex];
+    if (!level) { loading = false; return; }
+
+    const urls = hrrrUrls(cycle, fhour);
+    const fcRe = forecastQuery(fhour);
+    const displayName = variable.levels.length > 1
+      ? `${variable.label} @ ${level.label}`
+      : variable.label;
+    setStatus(`fetching ${displayName}...`);
+
+    try {
+      if (variable.kind === 'scalar' && level.query) {
+        const { field, grid } = await client.decode(urls.idx, {
+          parameter: level.query.parameter,
+          level: level.query.level,
+          forecast: fcRe,
+        });
+        if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+        scalarLayer.setVisible(true);
+        scalarLayer.setData({ ...field, missingValue: NaN }, grid);
+        if (variable.colormap) scalarLayer.setColormap(variable.colormap);
+        if (variable.range) scalarLayer.setValueRange(variable.range);
+        windLayer.setVisible(false);
+
+        const range = variable.range ?? [field.min, field.max];
+        if (variable.colormap) {
+          legend.update(variable.colormap, range[0], range[1], variable.unit ?? '');
+        }
+        setStatus(`${displayName}\nmin ${field.min.toFixed(2)}  max ${field.max.toFixed(2)}`);
+      } else if (variable.kind === 'wind' && level.queryU && level.queryV) {
+        const { u, v, grid } = await client.decodePair(
+          urls.idx,
+          { parameter: level.queryU.parameter, level: level.queryU.level, forecast: fcRe },
+          { parameter: level.queryV.parameter, level: level.queryV.level, forecast: fcRe },
+        );
+
+        // Compute wind speed magnitude for the scalar raster underneath particles
+        const speed = new Float32Array(u.values.length);
+        let sMin = Infinity, sMax = -Infinity;
+        for (let i = 0; i < speed.length; i++) {
+          const s = Math.hypot(u.values[i]!, v.values[i]!);
+          speed[i] = s;
+          if (s < sMin) sMin = s;
+          if (s > sMax) sMax = s;
+        }
+        const speedField = { values: speed, nx: u.nx, ny: u.ny, min: sMin, max: sMax, missingValue: NaN };
+
+        // Show scalar raster (wind speed) underneath particles
+        if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+        scalarLayer.setVisible(true);
+        scalarLayer.setColormap('wind');
+        scalarLayer.setValueRange(WIND_RANGE_MS);
+        scalarLayer.setData(speedField, grid);
+
+        // Show wind particles on top
+        if (!windLayer.isAttached()) windLayer.attach(map);
+        windLayer.setVisible(true);
+        windLayer.setWind({ ...u, missingValue: NaN }, { ...v, missingValue: NaN }, grid);
+
+        legend.update('wind', WIND_RANGE_MS[0], WIND_RANGE_MS[1], 'kt');
+        setStatus(`${displayName} loaded (${u.nx}\u00D7${u.ny})`);
       }
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err), true);
+    } finally {
+      loading = false;
     }
-  };
-  dimTransportationLayers();
+  }
 
-  // ---- layer visibility toggles -------------------------------------------
+  // ---- keyboard shortcuts ---------------------------------------------------
 
-  const hasMapLayer = (id: string): boolean => Boolean(map.getLayer(id));
+  document.addEventListener('keydown', (ev) => {
+    // Don't intercept when focused on input elements
+    const tag = (ev.target as HTMLElement).tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
 
-  // Scalar layer is a MapLibre CustomLayer — toggling re-adds to the map at
-  // the same beforeId to preserve z-order.
-  toggleScalarEl.addEventListener('change', () => {
-    if (toggleScalarEl.checked) {
-      if (!hasMapLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
-      scalarLayer.setVisible(true);
-    } else {
-      scalarLayer.setVisible(false);
+    switch (ev.key) {
+      case 'ArrowLeft':
+        ev.preventDefault();
+        timeline.stepHour(-1);
+        break;
+      case 'ArrowRight':
+        ev.preventDefault();
+        timeline.stepHour(1);
+        break;
+      case 'ArrowUp':
+        ev.preventDefault();
+        levelSlider.step(1);  // up = higher altitude = higher index
+        break;
+      case 'ArrowDown':
+        ev.preventDefault();
+        levelSlider.step(-1); // down = lower altitude = lower index
+        break;
     }
-    map.triggerRepaint();
   });
 
-  // Wind layer is a DOM canvas overlay — toggling re-attaches to the map's
-  // canvas container rather than calling map.addLayer/removeLayer.
-  toggleWindEl.addEventListener('change', () => {
-    if (toggleWindEl.checked) {
-      if (!windLayer.isAttached()) windLayer.attach(map);
-      windLayer.setVisible(true);
-    } else {
-      windLayer.setVisible(false);
-    }
-  });
+  // ---- click-to-inspect -----------------------------------------------------
 
-  removeScalarBtn.addEventListener('click', () => {
-    if (hasMapLayer('hrrr-scalar')) map.removeLayer('hrrr-scalar');
-    toggleScalarEl.checked = false;
-    toggleScalarEl.disabled = true;
-    removeScalarBtn.disabled = true;
-    removeScalarBtn.textContent = 'removed';
-  });
-
-  removeWindBtn.addEventListener('click', () => {
-    if (windLayer.isAttached()) windLayer.detach();
-    toggleWindEl.checked = false;
-    toggleWindEl.disabled = true;
-    removeWindBtn.disabled = true;
-    removeWindBtn.textContent = 'removed';
-  });
-
-  // ---- click-to-inspect ---------------------------------------------------
-
-  // One shared popup we re-home on each click.
   let popup: maplibregl.Popup | null = null;
   const showPopup = (lngLat: maplibregl.LngLat, html: string): void => {
     if (popup) popup.remove();
@@ -339,13 +294,17 @@ async function main(): Promise<void> {
     const { lng, lat } = ev.lngLat;
     const rows: string[] = [];
 
+    const level = currentVariable?.levels[levelSlider.index];
+    const displayName = currentVariable && level && currentVariable.levels.length > 1
+      ? `${currentVariable.label} @ ${level.label}`
+      : currentVariable?.label ?? '';
+
     // Scalar field readout
-    if (hasMapLayer('hrrr-scalar') && scalarLayer.isVisible()) {
+    if (map.getLayer('hrrr-scalar') && scalarLayer.isVisible()) {
       const s = scalarLayer.sampleAt(lng, lat);
       if (s && !Number.isNaN(s.value)) {
-        const label = currentScalarPreset?.label ?? 'Scalar';
-        const formatted = currentScalarPreset?.scalar?.format(s.value) ?? s.value.toFixed(3);
-        rows.push(`<div class="inspect-title">${escapeHtml(label)}</div>`);
+        const formatted = currentVariable?.format?.(s.value) ?? s.value.toFixed(3);
+        rows.push(`<div class="inspect-title">${escapeHtml(displayName || 'Scalar')}</div>`);
         rows.push(`<div class="inspect-row"><span class="k">value</span><span>${escapeHtml(formatted)}</span></div>`);
         rows.push(`<div class="inspect-row"><span class="k">grid i,j</span><span>${s.i}, ${s.j}</span></div>`);
         if (s.missing > 0) rows.push(`<div class="inspect-row"><span class="k">note</span><span>${s.missing}/4 corners missing</span></div>`);
@@ -357,9 +316,9 @@ async function main(): Promise<void> {
       const w = windLayer.sampleAt(lng, lat);
       if (w && Number.isFinite(w.speed)) {
         if (rows.length) rows.push('<div style="height:4px"></div>');
-        rows.push('<div class="inspect-title">10 m Wind</div>');
+        rows.push(`<div class="inspect-title">${escapeHtml(displayName || 'Wind')}</div>`);
         rows.push(`<div class="inspect-row"><span class="k">speed</span><span>${w.speed.toFixed(1)} m/s  (${(w.speed * 2.237).toFixed(1)} mph)</span></div>`);
-        rows.push(`<div class="inspect-row"><span class="k">from</span><span>${compassFromBearing(w.directionDeg)} (${w.directionDeg.toFixed(0)}°)</span></div>`);
+        rows.push(`<div class="inspect-row"><span class="k">from</span><span>${compassFromBearing(w.directionDeg)} (${w.directionDeg.toFixed(0)}\u00B0)</span></div>`);
         rows.push(`<div class="inspect-row"><span class="k">u / v</span><span>${w.u.toFixed(1)} / ${w.v.toFixed(1)}</span></div>`);
       }
     }
@@ -370,61 +329,15 @@ async function main(): Promise<void> {
     showPopup(ev.lngLat, rows.join(''));
   });
 
-  // ---- load a field -------------------------------------------------------
+  // ---- auto-load default variable on startup --------------------------------
 
-  async function load(): Promise<void> {
-    const preset = PRESETS.find((p) => p.key === fieldSel.value)!;
-    const cycle = cycleSel.value;
-    const fhour = Number(fhourSel.value);
-    const urls = hrrrUrls(cycle, fhour);
-    setStatus(`fetching ${preset.label}…`);
-
-    try {
-      if (preset.kind === 'scalar' && preset.scalar) {
-        const { field, grid } = await client.decode(urls.idx, {
-          parameter: preset.scalar.param,
-          level: preset.scalar.level,
-          forecast: fhour === 0 ? /^anl$/ : new RegExp(`^${fhour} hour fcst$`),
-        });
-        if (!hasMapLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
-        toggleScalarEl.checked = true;
-        toggleScalarEl.disabled = false;
-        removeScalarBtn.disabled = false;
-        removeScalarBtn.textContent = 'remove';
-        scalarLayer.setVisible(true);
-        scalarLayer.setData({ ...field, missingValue: NaN }, grid);
-        if (preset.scalar.colormap) scalarLayer.setColormap(preset.scalar.colormap);
-        // The wind palette is keyed in knots — pin the scalar range so color
-        // bands land on knot breakpoints instead of stretching to field extrema.
-        if (preset.scalar.colormap === 'wind') {
-          scalarLayer.setValueRange(WIND_RANGE_MS);
-        }
-        currentScalarPreset = preset;
-        setStatus(`${preset.label}\nmin ${field.min.toFixed(2)}  max ${field.max.toFixed(2)}`);
-      } else if (preset.kind === 'wind' && preset.wind) {
-        const fcRe = fhour === 0 ? /^anl$/ : new RegExp(`^${fhour} hour fcst$`);
-        const { u, v, grid } = await client.decodePair(
-          urls.idx,
-          { parameter: preset.wind.uParam, level: preset.wind.level, forecast: fcRe },
-          { parameter: preset.wind.vParam, level: preset.wind.level, forecast: fcRe },
-        );
-        if (!windLayer.isAttached()) windLayer.attach(map);
-        toggleWindEl.checked = true;
-        toggleWindEl.disabled = false;
-        removeWindBtn.disabled = false;
-        removeWindBtn.textContent = 'remove';
-        windLayer.setVisible(true);
-        windLayer.setWind({ ...u, missingValue: NaN }, { ...v, missingValue: NaN }, grid);
-        setStatus(`${preset.label} loaded (${u.nx}×${u.ny})`);
-      }
-    } catch (err) {
-      setStatus(err instanceof Error ? err.message : String(err), true);
-    }
+  const defaultVar = findVariable('temperature') ?? CATALOG[0];
+  if (defaultVar) {
+    currentVariable = defaultVar;
+    panel.setActive(defaultVar.id);
+    levelSlider.setLevels(defaultVar.levels);
+    void loadLevel(defaultVar, 0, timeline.cycle, timeline.fhour);
   }
-
-  loadBtn.addEventListener('click', () => { void load(); });
-  // Auto-load a default view so first paint isn't empty.
-  void load();
 }
 
 function escapeHtml(s: string): string {

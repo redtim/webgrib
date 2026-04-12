@@ -130,6 +130,14 @@ export async function fetchMessageBytes(
  *
  * cycle = "YYYYMMDDHH"; fhour is the forecast hour (0..48 depending on cycle).
  */
+/**
+ * Build a forecast-time regex for .idx matching.
+ * fhour 0 → /^anl$/, fhour N → /^N hour fcst$/
+ */
+export function forecastQuery(fhour: number): RegExp {
+  return fhour === 0 ? /^anl$/ : new RegExp(`^${fhour} hour fcst$`);
+}
+
 export function hrrrUrls(cycle: string, fhour: number, product: 'wrfsfcf' | 'wrfprsf' | 'wrfnatf' | 'wrfsubhf' = 'wrfsfcf'): { data: string; idx: string } {
   const yyyy = cycle.slice(0, 4);
   const mm = cycle.slice(4, 6);
