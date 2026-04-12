@@ -45,6 +45,7 @@ async function main(): Promise<void> {
     layersWrap.classList.toggle('collapsed', !layersVisible);
     expandBtn.classList.toggle('collapsed', !layersVisible);
     expandBtn.textContent = layersVisible ? 'Hide layers' : 'Show layers';
+    timelineBar.classList.toggle('panel-hidden', !layersVisible);
   });
 
   const map = new maplibregl.Map({
