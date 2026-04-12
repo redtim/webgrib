@@ -362,8 +362,8 @@ async function main(): Promise<void> {
       ? `${currentVariable.label} @ ${level.label}`
       : currentVariable?.label ?? '';
 
-    // Scalar field readout
-    if (map.getLayer('hrrr-scalar') && scalarLayer.isVisible()) {
+    // Scalar field readout (skip when wind variable is active — wind readout below is richer)
+    if (currentVariable?.kind !== 'wind' && map.getLayer('hrrr-scalar') && scalarLayer.isVisible()) {
       const s = scalarLayer.sampleAt(lng, lat);
       if (s && !Number.isNaN(s.value)) {
         const formatted = currentVariable?.format?.(s.value) ?? s.value.toFixed(3);
