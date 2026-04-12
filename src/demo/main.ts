@@ -24,7 +24,7 @@ interface FieldPreset {
     param: RegExp;
     level: RegExp;
     forecast?: RegExp;
-    colormap?: 'turbo' | 'viridis' | 'inferno' | 'temperature' | 'grayscale';
+    colormap?: 'turbo' | 'viridis' | 'inferno' | 'temperature' | 'grayscale' | 'wind';
     /** Convert the raw decoded value into the display unit for inspection. */
     format: (raw: number) => string;
   };
@@ -38,6 +38,12 @@ interface FieldPreset {
 
 const kelvinToF = (k: number): string => `${((k - 273.15) * 9 / 5 + 32).toFixed(1)} °F`;
 const metersToMi = (m: number): string => `${(m / 1609.344).toFixed(1)} mi`;
+
+// Wind palette is keyed in knots (Windy-style). HRRR fields are in m/s, so we
+// convert the desired knot range into m/s before handing it to layers.
+const KT_TO_MS = 0.514444;
+const WIND_RANGE_KT: [number, number] = [0, 60];
+const WIND_RANGE_MS: [number, number] = [WIND_RANGE_KT[0] * KT_TO_MS, WIND_RANGE_KT[1] * KT_TO_MS];
 
 const PRESETS: FieldPreset[] = [
   {
@@ -69,8 +75,8 @@ const PRESETS: FieldPreset[] = [
     scalar: {
       param: /^GUST$/,
       level: /^surface$/,
-      colormap: 'viridis',
-      format: (v) => `${v.toFixed(1)} m/s  (${(v * 2.237).toFixed(1)} mph)`,
+      colormap: 'wind',
+      format: (v) => `${(v / KT_TO_MS).toFixed(1)} kt  (${v.toFixed(1)} m/s)`,
     },
   },
   {
@@ -388,6 +394,11 @@ async function main(): Promise<void> {
         scalarLayer.setVisible(true);
         scalarLayer.setData({ ...field, missingValue: NaN }, grid);
         if (preset.scalar.colormap) scalarLayer.setColormap(preset.scalar.colormap);
+        // The wind palette is keyed in knots — pin the scalar range so color
+        // bands land on knot breakpoints instead of stretching to field extrema.
+        if (preset.scalar.colormap === 'wind') {
+          scalarLayer.setValueRange(WIND_RANGE_MS);
+        }
         currentScalarPreset = preset;
         setStatus(`${preset.label}\nmin ${field.min.toFixed(2)}  max ${field.max.toFixed(2)}`);
       } else if (preset.kind === 'wind' && preset.wind) {

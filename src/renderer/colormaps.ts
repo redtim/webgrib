@@ -5,7 +5,7 @@
  * Maps are lazily built so the module has no side effects at import time.
  */
 
-export type ColormapName = 'viridis' | 'turbo' | 'inferno' | 'grayscale' | 'temperature';
+export type ColormapName = 'viridis' | 'turbo' | 'inferno' | 'grayscale' | 'temperature' | 'wind';
 
 export function colormap(name: ColormapName): Uint8Array {
   switch (name) {
@@ -14,6 +14,7 @@ export function colormap(name: ColormapName): Uint8Array {
     case 'inferno': return buildFromStops(INFERNO_STOPS);
     case 'grayscale': return buildFromStops([[0, 0, 0], [255, 255, 255]]);
     case 'temperature': return buildFromStops(TEMP_STOPS);
+    case 'wind': return buildFromStops(WIND_STOPS);
   }
 }
 
@@ -51,4 +52,22 @@ const INFERNO_STOPS: Array<[number, number, number]> = [
 const TEMP_STOPS: Array<[number, number, number]> = [
   [15, 15, 85], [30, 60, 180], [90, 150, 230], [190, 220, 240],
   [255, 240, 180], [255, 180, 80], [210, 70, 30], [120, 0, 0],
+];
+// Windy.com-style wind palette: dark indigo at calm, through blue / teal /
+// green / yellow / orange / red to a deep maroon for extreme winds. Stops
+// are evenly spaced — `buildFromStops` interpolates between them — and the
+// consumer picks the value range via `uValueRange` (e.g. 0–30 m/s).
+const WIND_STOPS: Array<[number, number, number]> = [
+  [37, 4, 82],      // deep violet — calm
+  [42, 42, 132],    // indigo
+  [52, 86, 178],    // royal blue
+  [60, 138, 198],   // light blue
+  [62, 178, 172],   // teal / cyan
+  [76, 188, 108],   // green
+  [148, 208, 60],   // yellow-green
+  [232, 220, 52],   // yellow
+  [240, 158, 40],   // orange
+  [220, 72, 32],    // red
+  [150, 22, 22],    // dark red
+  [92, 18, 36],     // maroon — extreme
 ];
