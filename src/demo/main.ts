@@ -12,8 +12,13 @@ import maplibregl from 'maplibre-gl';
 import { ScalarFieldLayer, WindyLayer, LightningLayer } from '../renderer/index.js';
 import { hrrrUrls, forecastQuery } from '../grib2/idx.js';
 import { DecodeClient } from '../worker/client.js';
-import { CATALOG, findVariable } from '../renderer/catalog.js';
+import { CATALOG, findVariable, displayRange, displayUnit } from '../renderer/catalog.js';
 import type { CatalogVariable, VariableLevel } from '../renderer/catalog.js';
+import {
+  UNIT_OPTIONS, getUnitPref, setUnitPref, onUnitChange,
+  convertSpeed, unitLabel,
+} from './units.js';
+import type { Dimension } from './units.js';
 import { Panel } from './panel.js';
 import { Timeline } from './timeline.js';
 import { Legend } from './legend.js';
@@ -24,16 +29,19 @@ import { LevelSlider } from './levelSlider.js';
 const KT_TO_MS = 0.514444;
 const WIND_RANGE_MS: [number, number] = [0, 104];
 
-// Tick marks for the wind legend (in knots)
-const WIND_TICKS: LegendTick[] = [
-  { value: 0,  label: '0' },
-  { value: 5,  label: '5' },
-  { value: 10, label: '10' },
-  { value: 20, label: '20' },
-  { value: 30, label: '30' },
-  { value: 40, label: '40' },
-  { value: 60, label: '60' },
-];
+// Wind tick marks in m/s (native unit) — converted to display unit dynamically
+const WIND_TICK_MS = [0, 2.57, 5.14, 10.29, 15.43, 20.58, 30.87]; // ~0,5,10,20,30,40,60 kt
+
+/** Build wind legend args in the user's current speed unit. */
+function windLegendArgs(): [number, number, string, LegendTick[]] {
+  const u = getUnitPref('speed');
+  const ticks: LegendTick[] = WIND_TICK_MS.map((ms) => {
+    const v = convertSpeed(ms, u);
+    return { value: v, label: Math.round(v).toString() };
+  });
+  const maxDisplay = convertSpeed(104, u);
+  return [0, maxDisplay, unitLabel('speed'), ticks];
+}
 
 const setStatus = (text: string, error = false): void => {
   const el = document.getElementById('status')!;
@@ -223,6 +231,55 @@ async function main(): Promise<void> {
     ltCount.textContent = n > 0 ? `(${n})` : '';
   }, 2000);
 
+  // ---- unit preference selectors ---------------------------------------------
+
+  const unitWrap = document.createElement('div');
+  unitWrap.style.cssText = 'margin-top:8px;border-top:1px solid #30363d;padding-top:6px;';
+  const unitTitle = document.createElement('div');
+  unitTitle.style.cssText = 'color:#8b949e;font-size:10px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;';
+  unitTitle.textContent = 'Units';
+  unitWrap.appendChild(unitTitle);
+
+  const UNIT_LABELS: Record<string, string> = {
+    temperature: 'Temp', speed: 'Speed', length: 'Precip', distance: 'Dist',
+  };
+  for (const dim of Object.keys(UNIT_OPTIONS) as Dimension[]) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:11px;';
+    const lbl = document.createElement('span');
+    lbl.style.cssText = 'color:#8b949e;min-width:40px;';
+    lbl.textContent = UNIT_LABELS[dim] ?? dim;
+    row.appendChild(lbl);
+
+    const sel = document.createElement('select');
+    sel.style.cssText = 'background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:3px;font-size:10px;font-family:inherit;padding:1px 4px;';
+    for (const opt of UNIT_OPTIONS[dim]) {
+      const o = document.createElement('option');
+      o.value = opt as string;
+      o.textContent = dim === 'temperature' ? `\u00B0${opt}` : (opt as string);
+      if (opt === getUnitPref(dim)) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.addEventListener('change', () => {
+      setUnitPref(dim, sel.value as never);
+    });
+    row.appendChild(sel);
+    unitWrap.appendChild(row);
+  }
+  layersWrap.appendChild(unitWrap);
+
+  // Refresh legend when unit preferences change
+  function refreshLegend(): void {
+    if (!currentVariable?.colormap) return;
+    if (currentVariable.kind === 'wind') {
+      legend.update('wind', ...windLegendArgs());
+    } else {
+      const dr = displayRange(currentVariable);
+      legend.update(currentVariable.colormap, dr[0], dr[1], displayUnit(currentVariable));
+    }
+  }
+  onUnitChange(refreshLegend);
+
   // ---- load a variable at a specific level ----------------------------------
 
   async function loadLevel(
@@ -270,9 +327,9 @@ async function main(): Promise<void> {
         if (variable.range) scalarLayer.setValueRange(variable.range);
         windLayer.setVisible(false);
 
-        const range = variable.range ?? [field.min, field.max];
         if (variable.colormap) {
-          legend.update(variable.colormap, range[0], range[1], variable.unit ?? '');
+          const dr = displayRange(variable);
+          legend.update(variable.colormap, dr[0], dr[1], displayUnit(variable));
         }
         setStatus(displayName);
       } else if (variable.kind === 'wind' && level.queryU && level.queryV) {
@@ -305,7 +362,7 @@ async function main(): Promise<void> {
         windLayer.setVisible(true);
         windLayer.setWind({ ...u, missingValue: NaN }, { ...v, missingValue: NaN }, grid);
 
-        legend.update('wind', 0, 60, 'kt', WIND_TICKS);
+        legend.update('wind', ...windLegendArgs());
         setStatus(`${displayName} loaded (${u.nx}\u00D7${u.ny})`);
       }
     } catch (err) {
@@ -380,7 +437,8 @@ async function main(): Promise<void> {
       if (w && Number.isFinite(w.speed)) {
         if (rows.length) rows.push('<div style="height:4px"></div>');
         rows.push(`<div class="inspect-title">${escapeHtml(displayName || 'Wind')}</div>`);
-        rows.push(`<div class="inspect-row"><span class="k">speed</span><span>${w.speed.toFixed(1)} m/s  (${(w.speed * 2.237).toFixed(1)} mph)</span></div>`);
+        const su = getUnitPref('speed');
+        rows.push(`<div class="inspect-row"><span class="k">speed</span><span>${convertSpeed(w.speed, su).toFixed(1)} ${unitLabel('speed')}</span></div>`);
         rows.push(`<div class="inspect-row"><span class="k">from</span><span>${compassFromBearing(w.directionDeg)} (${w.directionDeg.toFixed(0)}\u00B0)</span></div>`);
         rows.push(`<div class="inspect-row"><span class="k">u / v</span><span>${w.u.toFixed(1)} / ${w.v.toFixed(1)}</span></div>`);
       }
