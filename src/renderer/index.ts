@@ -1,6 +1,6 @@
 export { ScalarFieldLayer } from './layers/scalarField.js';
-export { WindParticleLayer } from './layers/windParticles.js';
+export { WindyLayer } from './layers/windyLayer.js';
 export { colormap } from './colormaps.js';
 export type { ColormapName } from './colormaps.js';
 export type { ScalarFieldLayerOptions } from './layers/scalarField.js';
-export type { WindParticleLayerOptions } from './layers/windParticles.js';
+export type { WindyLayerOptions } from './layers/windyLayer.js';

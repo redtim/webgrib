@@ -10,7 +10,7 @@
  */
 
 import maplibregl from 'maplibre-gl';
-import { ScalarFieldLayer, WindParticleLayer } from '../renderer/index.js';
+import { ScalarFieldLayer, WindyLayer } from '../renderer/index.js';
 import { hrrrUrls } from '../grib2/idx.js';
 import { DecodeClient } from '../worker/client.js';
 
@@ -198,9 +198,13 @@ async function main(): Promise<void> {
 
   // Layers are created once; addLayer/removeLayer from the map as toggled.
   // Keeping them around across remove/re-add preserves their texture uploads
-  // and particle state, so we don't re-download GRIB2 after removing.
+  // (scalar) and resampled particle field (wind), so we don't re-download
+  // GRIB2 after removing.
   const scalarLayer = new ScalarFieldLayer({ id: 'hrrr-scalar', colormap: 'turbo', opacity: 0.85 });
-  const windLayer = new WindParticleLayer({ id: 'hrrr-wind', particleCount: 65536, colormap: 'turbo', opacity: 0.9 });
+  // WindyLayer is a DOM canvas overlay, not a MapLibre custom layer: it
+  // attaches to the map's canvas container directly via `attach(map)` and
+  // is tracked by `isAttached()` rather than `map.getLayer('hrrr-wind')`.
+  const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9 });
 
   const client = new DecodeClient();
 
@@ -225,7 +229,7 @@ async function main(): Promise<void> {
   const beforeId = findInsertionPoint();
 
   map.addLayer(scalarLayer, beforeId);
-  map.addLayer(windLayer, beforeId);
+  windLayer.attach(map);
 
   // Explicit coastline stroke — OpenMapTiles has no dedicated coastline
   // source layer; the water polygon edge IS the coastline. Adding a thin
@@ -272,35 +276,46 @@ async function main(): Promise<void> {
 
   // ---- layer visibility toggles -------------------------------------------
 
-  const hasLayer = (id: string): boolean => Boolean(map.getLayer(id));
+  const hasMapLayer = (id: string): boolean => Boolean(map.getLayer(id));
 
-  const syncToggle = (el: HTMLInputElement, layerId: string, layer: ScalarFieldLayer | WindParticleLayer): void => {
-    el.addEventListener('change', () => {
-      if (el.checked) {
-        // Re-add with the same beforeId we used initially so z-order is
-        // preserved across toggle cycles.
-        if (!hasLayer(layerId)) map.addLayer(layer, beforeId);
-        layer.setVisible(true);
-      } else {
-        layer.setVisible(false);
-      }
-      map.triggerRepaint();
-    });
-  };
-  syncToggle(toggleScalarEl, 'hrrr-scalar', scalarLayer);
-  syncToggle(toggleWindEl, 'hrrr-wind', windLayer);
+  // Scalar layer is a MapLibre CustomLayer — toggling re-adds to the map at
+  // the same beforeId to preserve z-order.
+  toggleScalarEl.addEventListener('change', () => {
+    if (toggleScalarEl.checked) {
+      if (!hasMapLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+      scalarLayer.setVisible(true);
+    } else {
+      scalarLayer.setVisible(false);
+    }
+    map.triggerRepaint();
+  });
 
-  const wireRemove = (btn: HTMLButtonElement, el: HTMLInputElement, layerId: string): void => {
-    btn.addEventListener('click', () => {
-      if (hasLayer(layerId)) map.removeLayer(layerId);
-      el.checked = false;
-      el.disabled = true;
-      btn.disabled = true;
-      btn.textContent = 'removed';
-    });
-  };
-  wireRemove(removeScalarBtn, toggleScalarEl, 'hrrr-scalar');
-  wireRemove(removeWindBtn, toggleWindEl, 'hrrr-wind');
+  // Wind layer is a DOM canvas overlay — toggling re-attaches to the map's
+  // canvas container rather than calling map.addLayer/removeLayer.
+  toggleWindEl.addEventListener('change', () => {
+    if (toggleWindEl.checked) {
+      if (!windLayer.isAttached()) windLayer.attach(map);
+      windLayer.setVisible(true);
+    } else {
+      windLayer.setVisible(false);
+    }
+  });
+
+  removeScalarBtn.addEventListener('click', () => {
+    if (hasMapLayer('hrrr-scalar')) map.removeLayer('hrrr-scalar');
+    toggleScalarEl.checked = false;
+    toggleScalarEl.disabled = true;
+    removeScalarBtn.disabled = true;
+    removeScalarBtn.textContent = 'removed';
+  });
+
+  removeWindBtn.addEventListener('click', () => {
+    if (windLayer.isAttached()) windLayer.detach();
+    toggleWindEl.checked = false;
+    toggleWindEl.disabled = true;
+    removeWindBtn.disabled = true;
+    removeWindBtn.textContent = 'removed';
+  });
 
   // ---- click-to-inspect ---------------------------------------------------
 
@@ -319,7 +334,7 @@ async function main(): Promise<void> {
     const rows: string[] = [];
 
     // Scalar field readout
-    if (hasLayer('hrrr-scalar') && scalarLayer.isVisible()) {
+    if (hasMapLayer('hrrr-scalar') && scalarLayer.isVisible()) {
       const s = scalarLayer.sampleAt(lng, lat);
       if (s && !Number.isNaN(s.value)) {
         const label = currentScalarPreset?.label ?? 'Scalar';
@@ -332,7 +347,7 @@ async function main(): Promise<void> {
     }
 
     // Wind readout
-    if (hasLayer('hrrr-wind') && windLayer.isVisible()) {
+    if (windLayer.isAttached() && windLayer.isVisible()) {
       const w = windLayer.sampleAt(lng, lat);
       if (w && Number.isFinite(w.speed)) {
         if (rows.length) rows.push('<div style="height:4px"></div>');
@@ -365,7 +380,7 @@ async function main(): Promise<void> {
           level: preset.scalar.level,
           forecast: fhour === 0 ? /^anl$/ : new RegExp(`^${fhour} hour fcst$`),
         });
-        if (!hasLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+        if (!hasMapLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
         toggleScalarEl.checked = true;
         toggleScalarEl.disabled = false;
         removeScalarBtn.disabled = false;
@@ -382,7 +397,7 @@ async function main(): Promise<void> {
           { parameter: preset.wind.uParam, level: preset.wind.level, forecast: fcRe },
           { parameter: preset.wind.vParam, level: preset.wind.level, forecast: fcRe },
         );
-        if (!hasLayer('hrrr-wind')) map.addLayer(windLayer, beforeId);
+        if (!windLayer.isAttached()) windLayer.attach(map);
         toggleWindEl.checked = true;
         toggleWindEl.disabled = false;
         removeWindBtn.disabled = false;
