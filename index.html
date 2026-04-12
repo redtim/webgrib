@@ -8,6 +8,8 @@
     <style>
       html, body, #map { margin: 0; padding: 0; width: 100%; height: 100%; background: #0b0d10; }
 
+      :root { --panel-width: 292px; }
+
       /* ---- panel ---- */
       #panel {
         position: absolute; top: 12px; left: 12px; z-index: 10;
@@ -16,7 +18,24 @@
         font-size: 12px; padding: 10px 12px; border-radius: 6px;
         border: 1px solid #30363d; min-width: 240px; max-width: 280px;
         max-height: calc(100vh - 24px); overflow-y: auto;
+        transition: transform 0.2s ease, opacity 0.2s ease;
       }
+      #panel.hidden {
+        transform: translateX(calc(-100% - 24px));
+        opacity: 0; pointer-events: none;
+      }
+      #panel-toggle {
+        position: absolute; top: 14px; z-index: 11;
+        left: var(--panel-width);
+        background: rgba(22, 27, 34, 0.92); color: #8b949e;
+        border: 1px solid #30363d; border-radius: 0 4px 4px 0;
+        padding: 4px 6px; cursor: pointer;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px; transition: left 0.2s ease;
+        line-height: 1;
+      }
+      #panel-toggle:hover { color: #e6edf3; }
+      #panel-toggle.collapsed { left: 12px; border-radius: 4px; }
       #panel h1 { font-size: 13px; margin: 0 0 6px 0; }
       #panel select { width: 100%; box-sizing: border-box; }
       #status { margin-top: 8px; color: #7ee787; white-space: pre-wrap; font-size: 11px; }
@@ -50,9 +69,39 @@
       .layer-kind-wind { background: #1f2d3d; color: #79c0ff; }
       .layer-label { font-size: 11px; }
 
-      /* ---- timeline ---- */
-      .timeline { margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px; }
-      .timeline-ticks { scrollbar-width: thin; scrollbar-color: #30363d transparent; }
+      /* ---- timeline bar (bottom) ---- */
+      #timeline-bar {
+        position: absolute; bottom: 10vh; z-index: 10;
+        /* Center in the space right of the panel */
+        left: calc(var(--panel-width) + (100vw - var(--panel-width)) / 2);
+        transform: translateX(-50%);
+        transition: left 0.2s ease;
+        background: rgba(22, 27, 34, 0.92);
+        border: 1px solid #30363d; border-radius: 8px;
+        padding: 8px 16px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px; color: #e6edf3;
+        max-width: calc(100vw - var(--panel-width) - 40px);
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+      }
+      #timeline-bar.panel-hidden {
+        left: 50%;
+        max-width: 90vw;
+      }
+      .timeline { display: flex; flex-direction: column; align-items: center; gap: 4px; overflow: hidden; }
+      .timeline-scroll {
+        overflow-x: auto; overflow-y: hidden; width: 100%;
+        scrollbar-width: thin; scrollbar-color: #30363d transparent;
+      }
+      .timeline-inner { display: inline-flex; flex-direction: column; min-width: 100%; }
+      .timeline-day-row { display: flex; align-items: flex-end; gap: 0; padding: 0 0 2px 0; flex-shrink: 0; }
+      .timeline-day-label {
+        color: #8b949e; font-size: 10px; font-weight: bold; text-transform: uppercase;
+        text-align: center; border-left: 1px solid #484f58; padding: 0 4px;
+        flex-shrink: 0;
+      }
+      .timeline-day-label:first-child { border-left: none; }
+      .timeline-ticks { flex-shrink: 0; }
       .timeline-tick {
         flex-shrink: 0; min-width: 20px; padding: 2px 3px;
         background: #161b22; border: 1px solid #30363d; border-radius: 3px;
@@ -98,10 +147,12 @@
     </style>
   </head>
   <body>
+    <button id="panel-toggle">Layers</button>
     <div id="panel">
       <h1>gribwebview · HRRR</h1>
       <div id="status">idle</div>
     </div>
+    <div id="timeline-bar"></div>
     <div id="map"></div>
     <script type="module" src="/src/demo/main.ts"></script>
   </body>

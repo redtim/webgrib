@@ -1,6 +1,6 @@
 /**
  * Forecast timeline control. Shows a cycle selector and a horizontal bar of
- * forecast-hour ticks. Clicking a tick fires the onChange callback.
+ * forecast-hour ticks grouped by day with labels and dividers.
  */
 
 export interface TimelineOptions {
@@ -10,6 +10,7 @@ export interface TimelineOptions {
 
 export class Timeline {
   private cycleSelect: HTMLSelectElement;
+  private dayRow: HTMLElement;
   private tickContainer: HTMLElement;
   private validLabel: HTMLElement;
   private _cycle = '';
@@ -28,23 +29,34 @@ export class Timeline {
 
     // Cycle row
     const cycleRow = document.createElement('div');
-    cycleRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:4px;';
+    cycleRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:4px;justify-content:center;';
     const cycleLabel = document.createElement('span');
-    cycleLabel.textContent = 'Cycle';
+    cycleLabel.textContent = 'Model Run';
     cycleLabel.style.cssText = 'color:#8b949e;font-size:11px;';
     this.cycleSelect = document.createElement('select');
-    this.cycleSelect.style.cssText = 'flex:1;';
+    this.cycleSelect.style.cssText = 'width:auto;';
     this.validLabel = document.createElement('span');
-    this.validLabel.style.cssText = 'color:#7ee787;font-size:11px;margin-left:auto;';
+    this.validLabel.style.cssText = 'color:#7ee787;font-size:11px;';
     cycleRow.append(cycleLabel, this.cycleSelect, this.validLabel);
+
+    // Scrollable container for day labels + ticks (scroll together)
+    const scrollWrap = document.createElement('div');
+    scrollWrap.className = 'timeline-scroll';
+    const inner = document.createElement('div');
+    inner.className = 'timeline-inner';
+
+    // Day labels row
+    this.dayRow = document.createElement('div');
+    this.dayRow.className = 'timeline-day-row';
 
     // Tick bar
     this.tickContainer = document.createElement('div');
     this.tickContainer.className = 'timeline-ticks';
-    this.tickContainer.style.cssText =
-      'display:flex;gap:1px;overflow-x:auto;padding:2px 0;';
+    this.tickContainer.style.cssText = 'display:flex;gap:1px;padding:2px 0;';
 
-    wrapper.append(cycleRow, this.tickContainer);
+    inner.append(this.dayRow, this.tickContainer);
+    scrollWrap.appendChild(inner);
+    wrapper.append(cycleRow, scrollWrap);
     opts.parent.appendChild(wrapper);
 
     // Populate cycles
@@ -75,14 +87,18 @@ export class Timeline {
     const cycleHH = Number(this._cycle.slice(8, 10));
     this._maxHour = cycleHH % 6 === 0 ? 48 : 18;
     this.tickContainer.innerHTML = '';
+    this.dayRow.innerHTML = '';
 
-    const cy = Number(this._cycle.slice(0, 4));
-    const cm = Number(this._cycle.slice(4, 6)) - 1;
-    const cd = Number(this._cycle.slice(6, 8));
+    const cycleMs = parseCycleUTC(this._cycle).getTime();
+
+    // Group hours by local day for day labels
+    interface DayGroup { label: string; count: number }
+    const groups: DayGroup[] = [];
+    let prevDayKey = '';
 
     for (let h = 0; h <= this._maxHour; h++) {
-      const valid = new Date(Date.UTC(cy, cm, cd, cycleHH + h));
-      const day = DAYS[valid.getDay()]!;
+      const valid = new Date(cycleMs + h * 3600000);
+      const dayKey = `${valid.getDay()}-${valid.getDate()}`;
       const hr = valid.getHours();
       const ampm = hr >= 12 ? 'p' : 'a';
       const h12 = hr === 0 ? 12 : hr > 12 ? hr - 12 : hr;
@@ -91,20 +107,37 @@ export class Timeline {
       tick.className = 'timeline-tick';
       tick.dataset.hour = String(h);
       tick.textContent = `${h12}${ampm}`;
-      tick.title = `t:${h} ${day} ${h12}${ampm === 'p' ? 'pm' : 'am'}`;
+      tick.title = `t:${h} ${DAYS[valid.getDay()]!} ${h12}${ampm === 'p' ? 'pm' : 'am'}`;
       tick.addEventListener('click', () => this.selectHour(h));
       this.tickContainer.appendChild(tick);
+
+      if (dayKey !== prevDayKey) {
+        groups.push({ label: `${DAYS[valid.getDay()]!} ${valid.getMonth() + 1}/${valid.getDate()}`, count: 1 });
+        prevDayKey = dayKey;
+      } else {
+        groups[groups.length - 1]!.count++;
+      }
+    }
+
+    // Build day label spans — each spans the width of its tick group.
+    // We measure tick width after render, but since ticks are uniform we can
+    // use a proportional flex approach.
+    for (const g of groups) {
+      const label = document.createElement('span');
+      label.className = 'timeline-day-label';
+      label.textContent = g.label;
+      // Each tick is ~min-width 20px + 1px gap. Use flex to match.
+      label.style.flex = String(g.count);
+      this.dayRow.appendChild(label);
     }
   }
 
   selectHour(h: number): void {
     this._fhour = h;
-    // Highlight active tick
     for (const el of this.tickContainer.children) {
       const tickEl = el as HTMLElement;
       const isActive = el.getAttribute('data-hour') === String(h);
       tickEl.classList.toggle('active', isActive);
-      // Scroll active tick into view
       if (isActive) tickEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
     this.updateValidLabel();
