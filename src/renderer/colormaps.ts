@@ -26,7 +26,7 @@ export function colormap(name: ColormapName): Uint8Array {
     case 'inferno': return buildFromStops(INFERNO_STOPS);
     case 'grayscale': return buildFromStops([[0, 0, 0], [255, 255, 255]]);
     case 'temperature': return buildFromStops(TEMP_STOPS);
-    case 'wind': return buildFromStops(WIND_STOPS);
+    case 'wind': return buildFromPositionedStops(WIND_STOPS);
     case 'precipitation': {
       const lut = buildFromStops(PRECIP_STOPS);
       lut[3] = 0; // index 0 (value 0.0) = fully transparent
@@ -71,6 +71,29 @@ function buildFromStops(stops: Array<[number, number, number]>): Uint8Array {
   return out;
 }
 
+/** Like buildFromStops but each stop carries an explicit position (0–1). */
+function buildFromPositionedStops(
+  stops: Array<{ t: number; rgb: [number, number, number] }>,
+): Uint8Array {
+  const n = 256;
+  const out = new Uint8Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    // Find the segment this t falls into
+    let s = 0;
+    while (s < stops.length - 2 && stops[s + 1]!.t < t) s++;
+    const a = stops[s]!;
+    const b = stops[s + 1]!;
+    const span = b.t - a.t;
+    const f = span > 0 ? (t - a.t) / span : 0;
+    out[i * 4 + 0] = Math.round(a.rgb[0] + (b.rgb[0] - a.rgb[0]) * f);
+    out[i * 4 + 1] = Math.round(a.rgb[1] + (b.rgb[1] - a.rgb[1]) * f);
+    out[i * 4 + 2] = Math.round(a.rgb[2] + (b.rgb[2] - a.rgb[2]) * f);
+    out[i * 4 + 3] = 255;
+  }
+  return out;
+}
+
 // Coarse key stops sampled from matplotlib palettes. Good enough for a LUT.
 const VIRIDIS_STOPS: Array<[number, number, number]> = [
   [68, 1, 84], [72, 35, 116], [64, 67, 135], [52, 94, 141], [41, 120, 142],
@@ -88,23 +111,30 @@ const TEMP_STOPS: Array<[number, number, number]> = [
   [15, 15, 85], [30, 60, 180], [90, 150, 230], [190, 220, 240],
   [255, 240, 180], [255, 180, 80], [210, 70, 30], [120, 0, 0],
 ];
-// Windy.com-style wind palette: dark indigo at calm, through blue / teal /
-// green / yellow / orange / red to a deep maroon for extreme winds. Stops
-// are evenly spaced — `buildFromStops` interpolates between them — and the
-// consumer picks the value range via `uValueRange` (e.g. 0–30 m/s).
-const WIND_STOPS: Array<[number, number, number]> = [
-  [37, 4, 82],      // deep violet — calm
-  [42, 42, 132],    // indigo
-  [52, 86, 178],    // royal blue
-  [60, 138, 198],   // light blue
-  [62, 178, 172],   // teal / cyan
-  [76, 188, 108],   // green
-  [148, 208, 60],   // yellow-green
-  [232, 220, 52],   // yellow
-  [240, 158, 40],   // orange
-  [220, 72, 32],    // red
-  [150, 22, 22],    // dark red
-  [92, 18, 36],     // maroon — extreme
+// Wind palette — exact RGB stops keyed by m/s. Positions are fractions of the
+// display range (WIND_MAX_MS). Data from GRIB is already in m/s.
+const WIND_MAX_MS = 104; // palette spans 0–104 m/s
+const WIND_STOPS: Array<{ t: number; rgb: [number, number, number] }> = [
+  { t:   0 / WIND_MAX_MS, rgb: [98, 113, 183] },   //   0 m/s
+  { t:   1 / WIND_MAX_MS, rgb: [57, 97, 159] },     //   1 m/s
+  { t:   3 / WIND_MAX_MS, rgb: [74, 148, 169] },    //   3 m/s
+  { t:   5 / WIND_MAX_MS, rgb: [77, 141, 123] },    //   5 m/s
+  { t:   7 / WIND_MAX_MS, rgb: [83, 165, 83] },     //   7 m/s
+  { t:   9 / WIND_MAX_MS, rgb: [53, 159, 53] },     //   9 m/s
+  { t:  11 / WIND_MAX_MS, rgb: [167, 157, 81] },    //  11 m/s
+  { t:  13 / WIND_MAX_MS, rgb: [159, 127, 58] },    //  13 m/s
+  { t:  15 / WIND_MAX_MS, rgb: [161, 108, 92] },    //  15 m/s
+  { t:  17 / WIND_MAX_MS, rgb: [129, 58, 78] },     //  17 m/s
+  { t:  19 / WIND_MAX_MS, rgb: [175, 80, 136] },    //  19 m/s
+  { t:  21 / WIND_MAX_MS, rgb: [117, 74, 147] },    //  21 m/s
+  { t:  24 / WIND_MAX_MS, rgb: [109, 97, 163] },    //  24 m/s
+  { t:  27 / WIND_MAX_MS, rgb: [68, 105, 141] },    //  27 m/s
+  { t:  29 / WIND_MAX_MS, rgb: [92, 144, 152] },    //  29 m/s
+  { t:  36 / WIND_MAX_MS, rgb: [125, 68, 165] },    //  36 m/s
+  { t:  46 / WIND_MAX_MS, rgb: [231, 215, 215] },   //  46 m/s
+  { t:  51 / WIND_MAX_MS, rgb: [219, 212, 135] },   //  51 m/s
+  { t:  77 / WIND_MAX_MS, rgb: [205, 202, 112] },   //  77 m/s
+  { t: 104 / WIND_MAX_MS, rgb: [128, 128, 128] },   // 104 m/s
 ];
 // Precipitation: white → green → yellow → orange → red → magenta
 const PRECIP_STOPS: Array<[number, number, number]> = [

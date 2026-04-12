@@ -106,7 +106,7 @@ export const CATALOG: CatalogVariable[] = [
   },
   {
     id: 'gust', group: 'Wind', label: 'Wind Gust', kind: 'scalar',
-    colormap: 'wind', range: [0, 30.87], unit: 'kt', format: fmtWind,
+    colormap: 'wind', range: [0, 104], unit: 'kt', format: fmtWind,
     levels: [scalarLevel('Surface', /^GUST$/, /^surface$/)],
   },
 
