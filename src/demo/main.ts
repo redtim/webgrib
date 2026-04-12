@@ -32,17 +32,19 @@ const setStatus = (text: string, error = false): void => {
 async function main(): Promise<void> {
   const panelRoot = document.getElementById('panel')!;
   const timelineBar = document.getElementById('timeline-bar')!;
-  const panelToggle = document.getElementById('panel-toggle')!;
 
-  // Panel show/hide
-  let panelVisible = true;
-  panelToggle.textContent = '\u25C0';
-  panelToggle.addEventListener('click', () => {
-    panelVisible = !panelVisible;
-    panelRoot.classList.toggle('hidden', !panelVisible);
-    timelineBar.classList.toggle('panel-hidden', !panelVisible);
-    panelToggle.classList.toggle('collapsed', !panelVisible);
-    panelToggle.textContent = panelVisible ? '\u25C0' : '\u25B6';
+  // Created now, appended after Legend so it sits below legend/status
+  const layersWrap = document.createElement('div');
+  layersWrap.id = 'panel-layers';
+  const expandBtn = document.createElement('div');
+  expandBtn.id = 'panel-expand';
+  expandBtn.textContent = 'Hide layers';
+  let layersVisible = true;
+  expandBtn.addEventListener('click', () => {
+    layersVisible = !layersVisible;
+    layersWrap.classList.toggle('collapsed', !layersVisible);
+    expandBtn.classList.toggle('collapsed', !layersVisible);
+    expandBtn.textContent = layersVisible ? 'Hide layers' : 'Show layers';
   });
 
   const map = new maplibregl.Map({
@@ -86,6 +88,10 @@ async function main(): Promise<void> {
 
   const legend = new Legend(panelRoot);
 
+  // Append collapsible layers section after the legend
+  panelRoot.appendChild(expandBtn);
+  panelRoot.appendChild(layersWrap);
+
   const timeline = new Timeline({
     parent: timelineBar,
     onChange: (_cycle, _fhour) => {
@@ -96,7 +102,7 @@ async function main(): Promise<void> {
   });
 
   const levelSlider = new LevelSlider({
-    parent: panelRoot,
+    parent: layersWrap,
     onChange: (levelIndex) => {
       if (currentVariable && !loading) {
         void loadLevel(currentVariable, levelIndex, timeline.cycle, timeline.fhour);
@@ -105,7 +111,7 @@ async function main(): Promise<void> {
   });
 
   const panel = new Panel({
-    parent: panelRoot,
+    parent: layersWrap,
     onSelect: (variable) => {
       currentVariable = variable;
       levelSlider.setLevels(variable.levels);
@@ -169,7 +175,7 @@ async function main(): Promise<void> {
       <span class="layer-kind" style="background:#3d2d1f;color:#ffcf57;width:16px;height:16px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;flex-shrink:0">&#9889;</span>
       <span>Live Lightning <span id="lightning-count" style="color:#8b949e;font-size:10px"></span></span>
     </label>`;
-  panelRoot.appendChild(ltToggle);
+  layersWrap.appendChild(ltToggle);
 
   const ltCheckbox = document.getElementById('toggle-lightning') as HTMLInputElement;
   const ltCount = document.getElementById('lightning-count')!;
@@ -223,7 +229,7 @@ async function main(): Promise<void> {
         if (variable.colormap) {
           legend.update(variable.colormap, range[0], range[1], variable.unit ?? '');
         }
-        setStatus(`${displayName}\nmin ${field.min.toFixed(2)}  max ${field.max.toFixed(2)}`);
+        setStatus(displayName);
       } else if (variable.kind === 'wind' && level.queryU && level.queryV) {
         const { u, v, grid } = await client.decodePair(
           urls.idx,
