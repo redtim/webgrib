@@ -9,7 +9,7 @@
  */
 
 import maplibregl from 'maplibre-gl';
-import { ScalarFieldLayer, WindyLayer } from '../renderer/index.js';
+import { ScalarFieldLayer, WindyLayer, LightningLayer } from '../renderer/index.js';
 import { hrrrUrls, forecastQuery } from '../grib2/idx.js';
 import { DecodeClient } from '../worker/client.js';
 import { CATALOG, findVariable } from '../renderer/catalog.js';
@@ -63,6 +63,7 @@ async function main(): Promise<void> {
     'rgba(255,255,255,1.0)',
   ];
   const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9, colorScale: GREY_PARTICLES });
+  const lightningLayer = new LightningLayer();
   const client = new DecodeClient();
 
   let currentVariable: CatalogVariable | null = null;
@@ -117,6 +118,7 @@ async function main(): Promise<void> {
 
   map.addLayer(scalarLayer, beforeId);
   windLayer.attach(map);
+  lightningLayer.attach(map);
 
   // Coastline stroke
   map.addLayer(
@@ -141,6 +143,32 @@ async function main(): Promise<void> {
       try { map.setPaintProperty(layer.id, 'icon-opacity', 0.45); } catch { /* */ }
     }
   }
+
+  // ---- lightning toggle ------------------------------------------------------
+
+  const ltToggle = document.createElement('div');
+  ltToggle.className = 'layer-group';
+  ltToggle.style.marginTop = '8px';
+  ltToggle.style.borderTop = '1px solid #30363d';
+  ltToggle.style.paddingTop = '6px';
+  ltToggle.innerHTML = `
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 6px;font-size:11px;">
+      <input type="checkbox" id="toggle-lightning" checked />
+      <span class="layer-kind" style="background:#3d2d1f;color:#ffcf57;width:16px;height:16px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;flex-shrink:0">&#9889;</span>
+      <span>Lightning <span id="lightning-count" style="color:#8b949e;font-size:10px"></span></span>
+    </label>`;
+  panelRoot.appendChild(ltToggle);
+
+  const ltCheckbox = document.getElementById('toggle-lightning') as HTMLInputElement;
+  const ltCount = document.getElementById('lightning-count')!;
+  ltCheckbox.addEventListener('change', () => {
+    lightningLayer.setVisible(ltCheckbox.checked);
+  });
+  // Update strike count periodically
+  setInterval(() => {
+    const n = lightningLayer.strikeCount;
+    ltCount.textContent = n > 0 ? `(${n})` : '';
+  }, 2000);
 
   // ---- load a variable at a specific level ----------------------------------
 
