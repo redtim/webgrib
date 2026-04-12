@@ -5,7 +5,10 @@
  * Maps are lazily built so the module has no side effects at import time.
  */
 
-export type ColormapName = 'viridis' | 'turbo' | 'inferno' | 'grayscale' | 'temperature' | 'wind';
+export type ColormapName =
+  | 'viridis' | 'turbo' | 'inferno' | 'grayscale'
+  | 'temperature' | 'wind'
+  | 'precipitation' | 'humidity' | 'cape' | 'cloud' | 'snow';
 
 export function colormap(name: ColormapName): Uint8Array {
   switch (name) {
@@ -15,6 +18,11 @@ export function colormap(name: ColormapName): Uint8Array {
     case 'grayscale': return buildFromStops([[0, 0, 0], [255, 255, 255]]);
     case 'temperature': return buildFromStops(TEMP_STOPS);
     case 'wind': return buildFromStops(WIND_STOPS);
+    case 'precipitation': return buildFromStops(PRECIP_STOPS);
+    case 'humidity': return buildFromStops(HUMIDITY_STOPS);
+    case 'cape': return buildFromStops(CAPE_STOPS);
+    case 'cloud': return buildFromStops(CLOUD_STOPS);
+    case 'snow': return buildFromStops(SNOW_STOPS);
   }
 }
 
@@ -70,4 +78,29 @@ const WIND_STOPS: Array<[number, number, number]> = [
   [220, 72, 32],    // red
   [150, 22, 22],    // dark red
   [92, 18, 36],     // maroon — extreme
+];
+// Precipitation: white → green → yellow → orange → red → magenta
+const PRECIP_STOPS: Array<[number, number, number]> = [
+  [240, 240, 240], [200, 230, 200], [120, 200, 120], [60, 180, 60],
+  [220, 220, 50], [240, 160, 30], [220, 60, 30], [180, 30, 100], [130, 20, 140],
+];
+// Humidity: tan → green → teal → blue
+const HUMIDITY_STOPS: Array<[number, number, number]> = [
+  [200, 180, 140], [160, 190, 110], [80, 180, 80],
+  [50, 170, 150], [40, 130, 180], [30, 80, 170],
+];
+// CAPE: white → yellow → orange → red → magenta → purple
+const CAPE_STOPS: Array<[number, number, number]> = [
+  [240, 240, 240], [255, 255, 150], [255, 220, 80],
+  [255, 140, 40], [230, 50, 30], [200, 30, 120], [120, 20, 160],
+];
+// Cloud cover: transparent-ish light gray → opaque white
+const CLOUD_STOPS: Array<[number, number, number]> = [
+  [30, 30, 40], [80, 85, 95], [140, 145, 155],
+  [190, 195, 200], [230, 233, 238],
+];
+// Snow: light blue → blue → purple
+const SNOW_STOPS: Array<[number, number, number]> = [
+  [220, 235, 250], [170, 210, 240], [100, 170, 220],
+  [60, 120, 200], [80, 60, 180], [100, 30, 150],
 ];
