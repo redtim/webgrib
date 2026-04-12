@@ -57,9 +57,14 @@ export class Timeline {
     }
     this._cycle = cycles[0] ?? '';
     this.cycleSelect.addEventListener('change', () => {
+      // Preserve the same valid (calendar) time when switching cycles.
+      const prevValidMs = this.validDate().getTime();
       this._cycle = this.cycleSelect.value;
       this.rebuildTicks();
-      this.selectHour(Math.min(this._fhour, this._maxHour));
+      const newCycleMs = parseCycleUTC(this._cycle).getTime();
+      const desiredFhour = Math.round((prevValidMs - newCycleMs) / 3600000);
+      const clamped = Math.max(0, Math.min(this._maxHour, desiredFhour));
+      this.selectHour(clamped);
     });
 
     this.rebuildTicks();
@@ -67,15 +72,26 @@ export class Timeline {
   }
 
   private rebuildTicks(): void {
-    const hh = Number(this._cycle.slice(8, 10));
-    this._maxHour = hh % 6 === 0 ? 48 : 18;
+    const cycleHH = Number(this._cycle.slice(8, 10));
+    this._maxHour = cycleHH % 6 === 0 ? 48 : 18;
     this.tickContainer.innerHTML = '';
+
+    const cy = Number(this._cycle.slice(0, 4));
+    const cm = Number(this._cycle.slice(4, 6)) - 1;
+    const cd = Number(this._cycle.slice(6, 8));
+
     for (let h = 0; h <= this._maxHour; h++) {
+      const valid = new Date(Date.UTC(cy, cm, cd, cycleHH + h));
+      const day = DAYS[valid.getDay()]!;
+      const hr = valid.getHours();
+      const ampm = hr >= 12 ? 'p' : 'a';
+      const h12 = hr === 0 ? 12 : hr > 12 ? hr - 12 : hr;
+
       const tick = document.createElement('button');
       tick.className = 'timeline-tick';
       tick.dataset.hour = String(h);
-      tick.textContent = String(h);
-      tick.title = `f${String(h).padStart(2, '0')}`;
+      tick.textContent = `${h12}${ampm}`;
+      tick.title = `t:${h} ${day} ${h12}${ampm === 'p' ? 'pm' : 'am'}`;
       tick.addEventListener('click', () => this.selectHour(h));
       this.tickContainer.appendChild(tick);
     }
@@ -101,17 +117,32 @@ export class Timeline {
     if (next !== this._fhour) this.selectHour(next);
   }
 
-  private updateValidLabel(): void {
-    // Compute valid time from cycle + fhour
-    const y = Number(this._cycle.slice(0, 4));
-    const m = Number(this._cycle.slice(4, 6)) - 1;
-    const d = Number(this._cycle.slice(6, 8));
-    const hh = Number(this._cycle.slice(8, 10));
-    const valid = new Date(Date.UTC(y, m, d, hh + this._fhour));
-    const pad = (n: number) => String(n).padStart(2, '0');
-    this.validLabel.textContent =
-      `Valid: ${pad(valid.getUTCHours())}Z ${pad(valid.getUTCMonth() + 1)}/${pad(valid.getUTCDate())}`;
+  /** Compute the valid Date from cycle + fhour. */
+  private validDate(): Date {
+    return new Date(parseCycleUTC(this._cycle).getTime() + this._fhour * 3600000);
   }
+
+  private updateValidLabel(): void {
+    const valid = this.validDate();
+    const day = DAYS[valid.getDay()]!;
+    const hour = valid.getHours();
+    const ampm = hour >= 12 ? 'pm' : 'am';
+    const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+    const mon = valid.getMonth() + 1;
+    const date = valid.getDate();
+    this.validLabel.textContent = `Valid: ${day} ${h12}${ampm} ${mon}/${date}`;
+  }
+}
+
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function parseCycleUTC(cycle: string): Date {
+  return new Date(Date.UTC(
+    Number(cycle.slice(0, 4)),
+    Number(cycle.slice(4, 6)) - 1,
+    Number(cycle.slice(6, 8)),
+    Number(cycle.slice(8, 10)),
+  ));
 }
 
 function recentCycles(count: number): string[] {

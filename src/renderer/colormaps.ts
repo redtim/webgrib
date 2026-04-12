@@ -8,7 +8,8 @@
 export type ColormapName =
   | 'viridis' | 'turbo' | 'inferno' | 'grayscale'
   | 'temperature' | 'wind'
-  | 'precipitation' | 'humidity' | 'cape' | 'cloud' | 'snow';
+  | 'precipitation' | 'humidity' | 'cape' | 'cloud' | 'snow'
+  | 'lightning';
 
 export function colormap(name: ColormapName): Uint8Array {
   switch (name) {
@@ -23,6 +24,11 @@ export function colormap(name: ColormapName): Uint8Array {
     case 'cape': return buildFromStops(CAPE_STOPS);
     case 'cloud': return buildFromStops(CLOUD_STOPS);
     case 'snow': return buildFromStops(SNOW_STOPS);
+    case 'lightning': {
+      const lut = buildFromStops(LIGHTNING_STOPS);
+      lut[3] = 0; // index 0 (value 0.0) = fully transparent
+      return lut;
+    }
   }
 }
 
@@ -103,4 +109,10 @@ const CLOUD_STOPS: Array<[number, number, number]> = [
 const SNOW_STOPS: Array<[number, number, number]> = [
   [220, 235, 250], [170, 210, 240], [100, 170, 220],
   [60, 120, 200], [80, 60, 180], [100, 30, 150],
+];
+// Lightning threat: dark purple → magenta → orange → yellow → white.
+// Index 0 is set to alpha=0 after building so value 0.0 is transparent.
+const LIGHTNING_STOPS: Array<[number, number, number]> = [
+  [40, 10, 60], [80, 40, 120], [180, 60, 180],
+  [255, 160, 40], [255, 240, 80], [255, 255, 255],
 ];
