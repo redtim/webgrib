@@ -162,11 +162,6 @@ export const CATALOG: CatalogVariable[] = [
     levels: [scalarLevel('Surface', /^PRATE$/, /^surface$/)],
   },
   {
-    id: 'snod', group: 'Precipitation', label: 'Snow Depth', kind: 'scalar',
-    colormap: 'snow', range: [0, 1], unit: 'cm', format: (v) => fmtCm(v * 100),
-    levels: [scalarLevel('Surface', /^SNOD$/, /^surface$/)],
-  },
-  {
     id: 'weasd', group: 'Precipitation', label: 'Snow Water Equiv.', kind: 'scalar',
     colormap: 'snow', range: [0, 50], unit: 'mm', format: fmtMm,
     levels: [scalarLevel('Surface', /^WEASD$/, /^surface$/)],
