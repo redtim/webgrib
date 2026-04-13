@@ -324,7 +324,7 @@ async function main(): Promise<void> {
         scalarLayer.setVisible(true);
         scalarLayer.setData({ ...field, missingValue: NaN }, grid);
         if (variable.colormap) scalarLayer.setColormap(variable.colormap);
-        if (variable.range) scalarLayer.setValueRange(variable.range);
+        scalarLayer.setValueRange(variable.range!);
         windLayer.setVisible(false);
 
         if (variable.colormap) {
@@ -355,7 +355,7 @@ async function main(): Promise<void> {
         scalarLayer.setVisible(true);
         scalarLayer.setColormap('wind');
         scalarLayer.setData(speedField, grid);
-        scalarLayer.setValueRange(WIND_RANGE_MS);
+        scalarLayer.setValueRange(variable.range!);
 
         // Show wind particles on top
         if (!windLayer.isAttached()) windLayer.attach(map);

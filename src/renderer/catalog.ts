@@ -169,7 +169,7 @@ export const CATALOG: CatalogVariable[] = [
 
   // Wind
   {
-    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', dimension: 'speed',
+    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', range: [0, 104], dimension: 'speed',
     levels: [
       windLevel('10m', /^UGRD$/, /^VGRD$/, /^10 m above ground$/),
       windLevel('80m', /^UGRD$/, /^VGRD$/, /^80 m above ground$/),
@@ -280,7 +280,7 @@ export const CATALOG: CatalogVariable[] = [
   // Lightning
   {
     id: 'lightning', group: 'Lightning', label: 'Lightning Threat', kind: 'scalar',
-    colormap: 'lightning', dimension: 'none', unit: 'fl/hr',
+    colormap: 'lightning', range: [0, 10], dimension: 'none', unit: 'fl/hr',
     format: (v: number) => `${v.toFixed(1)} flashes/hr`,
     levels: [scalarLevel('Entire Atm', /^LTNG$/, /^entire atmosphere$/)],
   },
