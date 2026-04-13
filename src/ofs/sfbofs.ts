@@ -33,9 +33,9 @@ export const SFBOFS_CYCLES = [3, 9, 15, 21] as const;
 export const SFBOFS_MAX_FHOUR = 48;
 
 // The regulargrid files have these dimensions (from the DDS):
-// time = 1, s_rho = 21 (depth levels), eta_rho = 329 (ny), xi_rho = 553 (nx)
-// We only want the surface level: s_rho index 20 (top layer in ROMS convention).
-const SURFACE_LEVEL = 20; // 0-indexed, top of water column
+// time = 1, Depth = 21 (0m..100m), ny = 329, nx = 553
+// Surface is depth index 0 (0 meters).
+const SURFACE_LEVEL = 0;
 
 /**
  * Build the OPeNDAP URL for a SFBOFS regulargrid file with variable subsetting.
@@ -44,17 +44,20 @@ const SURFACE_LEVEL = 20; // 0-indexed, top of water column
 function opendapUrl(cycle: number, date: string, fhour: number): string {
   const cc = String(cycle).padStart(2, '0');
   const fhhh = String(fhour).padStart(3, '0');
-  const base = `/ofs-proxy/thredds/dodsC/NOAA/SFBOFS/MODELS/${date}/nos.sfbofs.regulargrid.t${cc}z.${date}.fields.f${fhhh}.nc`;
+  // Date format in path: YYYY/MM/DD
+  const datePath = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)}`;
+  const base = `/ofs-proxy/thredds/dodsC/NOAA/SFBOFS/MODELS/${datePath}/sfbofs.t${cc}z.${date}.regulargrid.f${fhhh}.nc`;
 
-  // OPeNDAP constraint expression: surface level only for u/v, full 2D for lat/lon
-  const constraints = [
+  // OPeNDAP constraint expression: surface level only for u/v, full 2D for lat/lon.
+  // Brackets must be percent-encoded — THREDDS returns 400 on raw brackets.
+  const ce = [
     `u_eastward[0:0][${SURFACE_LEVEL}:${SURFACE_LEVEL}][0:328][0:552]`,
     `v_northward[0:0][${SURFACE_LEVEL}:${SURFACE_LEVEL}][0:328][0:552]`,
     `Latitude[0:328][0:552]`,
     `Longitude[0:328][0:552]`,
-  ].join(',');
+  ].join(',').replace(/\[/g, '%5B').replace(/\]/g, '%5D');
 
-  return `${base}.dods?${constraints}`;
+  return `${base}.dods?${ce}`;
 }
 
 /**
@@ -125,12 +128,14 @@ export async function fetchSfbofsSurface(
     }
   }
 
-  // Replace fill values (typically 1e37 or similar) with NaN
+  // Replace fill values (-99999 or similar large magnitudes) with NaN.
+  // Ocean currents are always < 30 m/s; anything beyond that is fill.
+  const FILL_THRESH = 100;
   const u = new Float32Array(uVar.data.length);
   const v = new Float32Array(vVar.data.length);
   for (let i = 0; i < u.length; i++) {
-    u[i] = Math.abs(uVar.data[i]!) > 1e10 ? NaN : uVar.data[i]!;
-    v[i] = Math.abs(vVar.data[i]!) > 1e10 ? NaN : vVar.data[i]!;
+    u[i] = Math.abs(uVar.data[i]!) > FILL_THRESH ? NaN : uVar.data[i]!;
+    v[i] = Math.abs(vVar.data[i]!) > FILL_THRESH ? NaN : vVar.data[i]!;
   }
 
   return { u, v, lat: latVar.data, lon: lonVar.data, nx, ny, bounds: { lonMin, lonMax, latMin, latMax } };

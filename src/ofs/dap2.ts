@@ -19,20 +19,21 @@ export function parseDap2(
   const dataMarker = findDataMarker(bytes);
   if (dataMarker < 0) throw new Error('DAP2: could not find "Data:" separator');
 
-  // Parse the DDS header to get array shapes.
+  // Parse the DDS header to get array shapes, types, and ORDER (binary follows DDS order).
   const ddsText = new TextDecoder().decode(bytes.subarray(0, dataMarker));
-  const shapes = parseDds(ddsText, variableNames);
+  const varInfo = parseDds(ddsText, variableNames);
+  const ddsOrder = parseDdsOrder(ddsText, variableNames);
 
-  // Parse binary section
+  // Parse binary section — must follow DDS declaration order
   const view = new DataView(buffer, dataMarker);
   let offset = 0;
   const result = new Map<string, { data: Float32Array; shape: number[] }>();
 
-  for (const name of variableNames) {
-    const shape = shapes.get(name);
-    if (!shape) throw new Error(`DAP2: variable "${name}" not found in DDS`);
+  for (const name of ddsOrder) {
+    const info = varInfo.get(name);
+    if (!info) throw new Error(`DAP2: variable "${name}" not found in DDS`);
 
-    const totalElements = shape.reduce((a, b) => a * b, 1);
+    const totalElements = info.shape.reduce((a, b) => a * b, 1);
 
     // Each array is preceded by two uint32 length fields
     const len1 = view.getUint32(offset, false); offset += 4;
@@ -42,14 +43,22 @@ export function parseDap2(
       throw new Error(`DAP2: expected ${totalElements} elements for "${name}", got ${len1}`);
     }
 
-    // Read big-endian float32 values
+    // Read values based on DDS type — always output as Float32Array
     const data = new Float32Array(totalElements);
-    for (let i = 0; i < totalElements; i++) {
-      data[i] = view.getFloat32(offset, false);
-      offset += 4;
+    if (info.dtype === 'Float64') {
+      for (let i = 0; i < totalElements; i++) {
+        data[i] = view.getFloat64(offset, false);
+        offset += 8;
+      }
+    } else {
+      // Float32 (default)
+      for (let i = 0; i < totalElements; i++) {
+        data[i] = view.getFloat32(offset, false);
+        offset += 4;
+      }
     }
 
-    result.set(name, { data, shape });
+    result.set(name, { data, shape: info.shape });
   }
 
   return result;
@@ -69,25 +78,40 @@ function findDataMarker(bytes: Uint8Array): number {
 }
 
 /**
- * Parse variable shapes from DDS text. Looks for lines like:
+ * Parse variable shapes and types from DDS text. Looks for lines like:
  *   Float32 u_eastward[time = 1][s_rho = 1][eta_rho = 329][xi_rho = 553];
+ *   Float64 Latitude[ny = 329][nx = 553];
  */
-function parseDds(dds: string, names: string[]): Map<string, number[]> {
-  const result = new Map<string, number[]>();
+function parseDds(dds: string, names: string[]): Map<string, { shape: number[]; dtype: string }> {
+  const result = new Map<string, { shape: number[]; dtype: string }>();
   for (const name of names) {
-    // Match: Float32 varname[dim1 = N][dim2 = M]...;
-    const re = new RegExp(`\\b${escapeRegex(name)}((?:\\[[^\\]]+\\])+)`, 'm');
+    // Match: Float32/Float64 varname[dim1 = N][dim2 = M]...;
+    const re = new RegExp(`(Float32|Float64|Int32|Int16)\\s+${escapeRegex(name)}((?:\\[[^\\]]+\\])+)`, 'm');
     const m = dds.match(re);
     if (!m) continue;
+    const dtype = m[1]!;
     const dims: number[] = [];
     const dimRe = /\[(?:\w+)\s*=\s*(\d+)\]/g;
     let dm: RegExpExecArray | null;
-    while ((dm = dimRe.exec(m[1]!)) !== null) {
+    while ((dm = dimRe.exec(m[2]!)) !== null) {
       dims.push(parseInt(dm[1]!, 10));
     }
-    result.set(name, dims);
+    result.set(name, { shape: dims, dtype });
   }
   return result;
+}
+
+/** Get variable names in DDS declaration order (binary data follows this order). */
+function parseDdsOrder(dds: string, requestedNames: string[]): string[] {
+  const nameSet = new Set(requestedNames);
+  const ordered: string[] = [];
+  // Match type declarations: Float32 varname[...] or Float64 varname[...]
+  const re = /(?:Float32|Float64|Int32|Int16)\s+(\w+)\s*\[/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(dds)) !== null) {
+    if (nameSet.has(m[1]!)) ordered.push(m[1]!);
+  }
+  return ordered;
 }
 
 function escapeRegex(s: string): string {
