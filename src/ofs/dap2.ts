@@ -50,6 +50,17 @@ export function parseDap2(
         data[i] = view.getFloat64(offset, false);
         offset += 8;
       }
+    } else if (info.dtype === 'Int32') {
+      for (let i = 0; i < totalElements; i++) {
+        data[i] = view.getInt32(offset, false);
+        offset += 4;
+      }
+    } else if (info.dtype === 'Int16') {
+      // XDR pads Int16 to 4 bytes (2 bytes data + 2 bytes padding)
+      for (let i = 0; i < totalElements; i++) {
+        data[i] = view.getInt16(offset, false);
+        offset += 4;
+      }
     } else {
       // Float32 (default)
       for (let i = 0; i < totalElements; i++) {
