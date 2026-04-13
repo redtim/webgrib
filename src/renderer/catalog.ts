@@ -97,7 +97,7 @@ export const CATALOG: CatalogVariable[] = [
 
   // Wind
   {
-    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', unit: 'kt',
+    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', range: [0, 104], unit: 'kt',
     levels: [
       windLevel('10m', /^UGRD$/, /^VGRD$/, /^10 m above ground$/),
       windLevel('80m', /^UGRD$/, /^VGRD$/, /^80 m above ground$/),
@@ -166,11 +166,6 @@ export const CATALOG: CatalogVariable[] = [
     levels: [scalarLevel('Surface', /^PRATE$/, /^surface$/)],
   },
   {
-    id: 'snod', group: 'Precipitation', label: 'Snow Depth', kind: 'scalar',
-    colormap: 'snow', range: [0, 1], unit: 'cm', format: (v) => fmtCm(v * 100),
-    levels: [scalarLevel('Surface', /^SNOD$/, /^surface$/)],
-  },
-  {
     id: 'weasd', group: 'Precipitation', label: 'Snow Water Equiv.', kind: 'scalar',
     colormap: 'snow', range: [0, 50], unit: 'mm', format: fmtMm,
     levels: [scalarLevel('Surface', /^WEASD$/, /^surface$/)],
@@ -208,7 +203,7 @@ export const CATALOG: CatalogVariable[] = [
   // Lightning
   {
     id: 'lightning', group: 'Lightning', label: 'Lightning Threat', kind: 'scalar',
-    colormap: 'lightning', unit: 'fl/hr',
+    colormap: 'lightning', range: [0, 10], unit: 'fl/hr',
     format: (v: number) => `${v.toFixed(1)} flashes/hr`,
     levels: [scalarLevel('Entire Atm', /^LTNG$/, /^entire atmosphere$/)],
   },
