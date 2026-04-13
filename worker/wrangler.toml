@@ -1,0 +1,6 @@
+name = "ofs-proxy"
+main = "ofs-proxy.js"
+compatibility_date = "2024-01-01"
+
+# Free tier — no paid plan needed
+# usage_model = "bundled"

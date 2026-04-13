@@ -15,6 +15,16 @@
 
 import { parseDap2 } from './dap2.js';
 
+/**
+ * OFS proxy base URL.
+ * - Dev: Vite proxy at /ofs-proxy rewrites to opendap.co-ops.nos.noaa.gov
+ * - Prod: Cloudflare Worker at the configured URL
+ *
+ * Set VITE_OFS_PROXY_URL in .env.production to your deployed worker URL,
+ * e.g. https://ofs-proxy.yourname.workers.dev
+ */
+const OFS_PROXY = import.meta.env.VITE_OFS_PROXY_URL as string | undefined ?? '/ofs-proxy';
+
 export interface OfsCurrentField {
   u: Float32Array;
   v: Float32Array;
@@ -46,7 +56,7 @@ function opendapUrl(cycle: number, date: string, fhour: number): string {
   const fhhh = String(fhour).padStart(3, '0');
   // Date format in path: YYYY/MM/DD
   const datePath = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)}`;
-  const base = `/ofs-proxy/thredds/dodsC/NOAA/SFBOFS/MODELS/${datePath}/sfbofs.t${cc}z.${date}.regulargrid.f${fhhh}.nc`;
+  const base = `${OFS_PROXY}/thredds/dodsC/NOAA/SFBOFS/MODELS/${datePath}/sfbofs.t${cc}z.${date}.regulargrid.f${fhhh}.nc`;
 
   // OPeNDAP constraint expression: surface level only for u/v, full 2D for lat/lon.
   // Brackets must be percent-encoded — THREDDS returns 400 on raw brackets.
