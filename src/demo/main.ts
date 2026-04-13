@@ -20,10 +20,6 @@ import { Legend } from './legend.js';
 import type { LegendTick } from './legend.js';
 import { LevelSlider } from './levelSlider.js';
 
-// Wind speed raster range in m/s — must match WIND_MAX_MS in colormaps.ts.
-const KT_TO_MS = 0.514444;
-const WIND_RANGE_MS: [number, number] = [0, 104];
-
 // Tick marks for the wind legend (in knots)
 const WIND_TICKS: LegendTick[] = [
   { value: 0,  label: '0' },
@@ -267,12 +263,11 @@ async function main(): Promise<void> {
         scalarLayer.setVisible(true);
         scalarLayer.setData({ ...field, missingValue: NaN }, grid);
         if (variable.colormap) scalarLayer.setColormap(variable.colormap);
-        if (variable.range) scalarLayer.setValueRange(variable.range);
+        scalarLayer.setValueRange(variable.range!);
         windLayer.setVisible(false);
 
-        const range = variable.range ?? [field.min, field.max];
         if (variable.colormap) {
-          legend.update(variable.colormap, range[0], range[1], variable.unit ?? '');
+          legend.update(variable.colormap, variable.range![0], variable.range![1], variable.unit ?? '');
         }
         setStatus(displayName);
       } else if (variable.kind === 'wind' && level.queryU && level.queryV) {
@@ -298,7 +293,7 @@ async function main(): Promise<void> {
         scalarLayer.setVisible(true);
         scalarLayer.setColormap('wind');
         scalarLayer.setData(speedField, grid);
-        scalarLayer.setValueRange(WIND_RANGE_MS);
+        scalarLayer.setValueRange(variable.range!);
 
         // Show wind particles on top
         if (!windLayer.isAttached()) windLayer.attach(map);
