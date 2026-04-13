@@ -23,6 +23,11 @@ export default {
       });
     }
 
+    // Only allow GET and HEAD — CORS headers already restrict to these
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      return new Response('Method not allowed', { status: 405, headers: corsHeaders() });
+    }
+
     const url = new URL(request.url);
 
     // Validate the path is a THREDDS request
@@ -42,15 +47,20 @@ export default {
       });
 
       // Stream the response back with CORS headers
+      const responseHeaders = {
+        'Content-Type': upstream.headers.get('Content-Type') || 'application/octet-stream',
+        'Cache-Control': 'public, max-age=300', // 5 min cache
+        ...corsHeaders(),
+      };
+      const contentLength = upstream.headers.get('Content-Length');
+      if (contentLength) {
+        responseHeaders['Content-Length'] = contentLength;
+      }
+
       const resp = new Response(upstream.body, {
         status: upstream.status,
         statusText: upstream.statusText,
-        headers: {
-          'Content-Type': upstream.headers.get('Content-Type') || 'application/octet-stream',
-          'Content-Length': upstream.headers.get('Content-Length') || '',
-          'Cache-Control': 'public, max-age=300', // 5 min cache
-          ...corsHeaders(),
-        },
+        headers: responseHeaders,
       });
 
       return resp;

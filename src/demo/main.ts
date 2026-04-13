@@ -272,7 +272,7 @@ async function main(): Promise<void> {
   // Refresh legend when unit preferences change
   function refreshLegend(): void {
     if (!currentVariable?.colormap) return;
-    if (currentVariable.kind === 'wind') {
+    if (currentVariable.kind === 'wind' && currentVariable.source !== 'ofs') {
       legend.update('wind', ...windLegendArgs());
     } else {
       const dr = displayRange(currentVariable);

@@ -37,7 +37,10 @@ export function parseDap2(
 
     // Each array is preceded by two uint32 length fields
     const len1 = view.getUint32(offset, false); offset += 4;
-    const _len2 = view.getUint32(offset, false); offset += 4;
+    const len2 = view.getUint32(offset, false); offset += 4;
+    if (len1 !== len2) {
+      throw new Error(`DAP2: mismatched duplicated array lengths for "${name}": ${len1} !== ${len2}`);
+    }
 
     if (len1 !== totalElements) {
       throw new Error(`DAP2: expected ${totalElements} elements for "${name}", got ${len1}`);
