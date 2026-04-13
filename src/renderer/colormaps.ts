@@ -9,7 +9,8 @@ export type ColormapName =
   | 'viridis' | 'turbo' | 'inferno' | 'grayscale'
   | 'temperature' | 'wind'
   | 'precipitation' | 'humidity' | 'cape' | 'cin' | 'cloud' | 'snow'
-  | 'lightning';
+  | 'lightning'
+  | 'ocean-currents';
 
 export function colormap(name: ColormapName): Uint8Array {
   switch (name) {
@@ -48,6 +49,11 @@ export function colormap(name: ColormapName): Uint8Array {
     case 'lightning': {
       const lut = buildFromStops(LIGHTNING_STOPS);
       lut[3] = 0; // index 0 (value 0.0) = fully transparent
+      return lut;
+    }
+    case 'ocean-currents': {
+      const lut = buildFromStops(OCEAN_CURRENT_STOPS);
+      lut[3] = 0; // index 0 (no current) = fully transparent
       return lut;
     }
   }
@@ -180,4 +186,10 @@ const SNOW_STOPS: Array<[number, number, number]> = [
 const LIGHTNING_STOPS: Array<[number, number, number]> = [
   [40, 10, 60], [80, 40, 120], [180, 60, 180],
   [255, 160, 40], [255, 240, 80], [255, 255, 255],
+];
+// Ocean currents: dark blue (calm) → teal → green → yellow → orange (fast)
+const OCEAN_CURRENT_STOPS: Array<[number, number, number]> = [
+  [10, 20, 80], [20, 60, 140], [30, 120, 160],
+  [40, 180, 140], [100, 200, 80], [200, 220, 50],
+  [240, 180, 40], [255, 120, 30],
 ];

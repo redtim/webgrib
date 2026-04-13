@@ -38,6 +38,10 @@ export interface CatalogVariable {
   range?: [number, number];
   unit?: string;
   format?: (v: number) => string;
+  /** Data source. Defaults to 'hrrr'. */
+  source?: 'hrrr' | 'ofs';
+  /** OFS model identifier (e.g., 'sfbofs'). Only used when source === 'ofs'. */
+  ofsModel?: string;
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -218,6 +222,15 @@ export const CATALOG: CatalogVariable[] = [
       scalarLevel('700 hPa', /^VVEL$/, /^700 mb$/),
       scalarLevel('500 hPa', /^VVEL$/, /^500 mb$/),
     ],
+  },
+
+  // Ocean
+  {
+    id: 'sfbofs-currents', group: 'Ocean', label: 'SF Bay Currents', kind: 'wind',
+    source: 'ofs', ofsModel: 'sfbofs',
+    colormap: 'ocean-currents', range: [0, 3], unit: 'm/s',
+    format: (v: number) => `${v.toFixed(2)} m/s`,
+    levels: [{ label: 'Surface' }],
   },
 ];
 

@@ -97,12 +97,13 @@ export class WindyLayer {
   private currentData: [WindyComponent, WindyComponent] | null = null;
   private currentMaxSpeed = 0;
 
-  // Original LCC wind field retained for sampleAt (click-to-inspect).
+  // Original wind field retained for sampleAt (click-to-inspect).
   private uValues: Float32Array | null = null;
   private vValues: Float32Array | null = null;
   private windNx = 0;
   private windNy = 0;
   private lcc: LccUniforms | null = null;
+  private latLonBounds: { lonMin: number; lonMax: number; latMin: number; latMax: number } | null = null;
 
   // Snapshot of user-provided options; we only read them when (re)starting.
   private readonly minVelocity: number;
@@ -210,10 +211,73 @@ export class WindyLayer {
     this.windNx = u.nx;
     this.windNy = u.ny;
     this.lcc = computeLccUniforms(grid);
+    this.latLonBounds = null;
 
     const resampled = resampleLccToLatLon(u, v, grid);
     this.currentData = resampled.components;
     this.currentMaxSpeed = resampled.maxSpeed;
+
+    if (this.map && this.visible) this.start();
+  }
+
+  /**
+   * Set wind data that is already on a regular lat/lon grid (e.g., OFS data).
+   * Skips LCC resampling — the data goes directly to windy.js.
+   */
+  setWindLatLon(
+    u: Float32Array, v: Float32Array,
+    nx: number, ny: number,
+    bounds: { lonMin: number; lonMax: number; latMin: number; latMax: number },
+  ): void {
+    // Retain for sampleAt — store as raw values with simple lat/lon mapping
+    this.uValues = u;
+    this.vValues = v;
+    this.windNx = nx;
+    this.windNy = ny;
+    this.lcc = null; // Signal that we're in lat/lon mode
+    this.latLonBounds = bounds;
+
+    // Build windy.js components directly — NW-origin scan (row 0 = northernmost)
+    const dx = (bounds.lonMax - bounds.lonMin) / (nx - 1);
+    const dy = (bounds.latMax - bounds.latMin) / (ny - 1);
+
+    // The data from OFS is typically S→N (lat increases with row index).
+    // windy.js expects N→S (scanMode 0), so we flip rows.
+    const uFlipped = new Float32Array(u.length);
+    const vFlipped = new Float32Array(v.length);
+    for (let j = 0; j < ny; j++) {
+      const srcRow = j * nx;
+      const dstRow = (ny - 1 - j) * nx;
+      for (let i = 0; i < nx; i++) {
+        const uVal = u[srcRow + i]!;
+        const vVal = v[srcRow + i]!;
+        uFlipped[dstRow + i] = Number.isNaN(uVal) ? 0 : uVal;
+        vFlipped[dstRow + i] = Number.isNaN(vVal) ? 0 : vVal;
+      }
+    }
+
+    const baseHeader = {
+      lo1: bounds.lonMin,
+      la1: bounds.latMax, // NW corner
+      dx, dy,
+      nx, ny,
+      refTime: new Date().toISOString(),
+      forecastTime: 0,
+      scanMode: 0,
+    };
+
+    this.currentData = [
+      { header: { ...baseHeader, parameterCategory: 2, parameterNumber: 2 }, data: uFlipped },
+      { header: { ...baseHeader, parameterCategory: 2, parameterNumber: 3 }, data: vFlipped },
+    ];
+
+    // Compute max speed
+    let maxSpeed = 0;
+    for (let i = 0; i < u.length; i++) {
+      const s = Math.hypot(u[i]!, v[i]!);
+      if (s > maxSpeed && Number.isFinite(s)) maxSpeed = s;
+    }
+    this.currentMaxSpeed = maxSpeed;
 
     if (this.map && this.visible) this.start();
   }
@@ -225,8 +289,18 @@ export class WindyLayer {
    * working unchanged.
    */
   sampleAt(lonDeg: number, latDeg: number): WindSample | null {
-    if (!this.uValues || !this.vValues || !this.lcc) return null;
-    const { u, v } = lonLatToGridUV(this.lcc, lonDeg, latDeg);
+    if (!this.uValues || !this.vValues) return null;
+    let u: number, v: number;
+    if (this.latLonBounds) {
+      const b = this.latLonBounds;
+      u = (lonDeg - b.lonMin) / (b.lonMax - b.lonMin);
+      v = (latDeg - b.latMin) / (b.latMax - b.latMin);
+    } else if (this.lcc) {
+      const uv = lonLatToGridUV(this.lcc, lonDeg, latDeg);
+      u = uv.u; v = uv.v;
+    } else {
+      return null;
+    }
     if (u < 0 || u > 1 || v < 0 || v > 1) return null;
 
     const nx = this.windNx;

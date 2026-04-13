@@ -13,7 +13,8 @@ import { ScalarFieldLayer, WindyLayer, LightningLayer } from '../renderer/index.
 import { hrrrUrls, forecastQuery } from '../grib2/idx.js';
 import { DecodeClient } from '../worker/client.js';
 import { CATALOG, findVariable } from '../renderer/catalog.js';
-import type { CatalogVariable, VariableLevel } from '../renderer/catalog.js';
+import type { CatalogVariable } from '../renderer/catalog.js';
+import { fetchSfbofsSurface, latestCycle as sfbofsLatestCycle } from '../ofs/sfbofs.js';
 import { Panel } from './panel.js';
 import { Timeline } from './timeline.js';
 import { Legend } from './legend.js';
@@ -239,6 +240,18 @@ async function main(): Promise<void> {
     const level = variable.levels[levelIndex];
     if (!level) { loading = false; return; }
 
+    // Route OFS variables to the OFS loader
+    if (variable.source === 'ofs') {
+      try {
+        await loadOfsLevel(variable);
+      } catch (err) {
+        setStatus(err instanceof Error ? err.message : String(err), true);
+      } finally {
+        loading = false;
+      }
+      return;
+    }
+
     const urls = hrrrUrls(cycle, fhour);
     const fcRe = forecastQuery(fhour);
     const displayName = variable.levels.length > 1
@@ -313,6 +326,59 @@ async function main(): Promise<void> {
     } finally {
       loading = false;
     }
+  }
+
+  // ---- load OFS variable -----------------------------------------------------
+
+  async function loadOfsLevel(variable: CatalogVariable): Promise<void> {
+    if (variable.ofsModel !== 'sfbofs') {
+      setStatus(`Unknown OFS model: ${variable.ofsModel}`, true);
+      return;
+    }
+    const displayName = variable.label;
+    setStatus(`fetching ${displayName}...`);
+
+    // Use the latest available SFBOFS cycle and forecast hour 1
+    const { cycle, date } = sfbofsLatestCycle();
+    const fhour = 1; // Default to forecast hour 1 for now
+
+    const field = await fetchSfbofsSurface(cycle, date, fhour);
+
+    // Compute speed magnitude for the scalar raster
+    const speed = new Float32Array(field.u.length);
+    let sMin = Infinity, sMax = -Infinity;
+    for (let i = 0; i < speed.length; i++) {
+      const s = Math.hypot(field.u[i]!, field.v[i]!);
+      speed[i] = Number.isNaN(s) ? NaN : s;
+      if (s < sMin && Number.isFinite(s)) sMin = s;
+      if (s > sMax && Number.isFinite(s)) sMax = s;
+    }
+    const speedField = { values: speed, nx: field.nx, ny: field.ny, min: sMin, max: sMax, missingValue: NaN };
+
+    // Show scalar raster (current speed) with lat/lon projection
+    if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+    scalarLayer.setVisible(true);
+    if (variable.colormap) scalarLayer.setColormap(variable.colormap);
+    scalarLayer.setDataLatLon(speedField, field.bounds);
+    if (variable.range) scalarLayer.setValueRange(variable.range);
+
+    // Show current particles
+    if (!windLayer.isAttached()) windLayer.attach(map);
+    windLayer.setVisible(true);
+    windLayer.setWindLatLon(field.u, field.v, field.nx, field.ny, field.bounds);
+
+    const range = variable.range ?? [sMin, sMax];
+    if (variable.colormap) {
+      legend.update(variable.colormap, range[0], range[1], variable.unit ?? '');
+    }
+
+    // Zoom to the SF Bay area
+    map.fitBounds(
+      [[field.bounds.lonMin, field.bounds.latMin], [field.bounds.lonMax, field.bounds.latMax]],
+      { padding: 20, maxZoom: 10 },
+    );
+
+    setStatus(`${displayName} loaded (${field.nx}\u00D7${field.ny}, cycle ${date} t${String(cycle).padStart(2, '0')}z f${String(fhour).padStart(3, '0')})`);
   }
 
   // ---- keyboard shortcuts ---------------------------------------------------

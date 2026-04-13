@@ -30,6 +30,10 @@ import {
 } from '../gl/texture.js';
 import { colormap, type ColormapName } from '../colormaps.js';
 import { LCC_GLSL, computeLccUniforms, gridLonLatBounds, lonLatToGridUV, lonLatToMercator, type LccUniforms } from '../projections/lcc.js';
+import {
+  LATLON_GLSL, computeLatLonUniforms, lonLatToGridUVLatLon, latLonBoundsToMercator,
+  type LatLonBounds, type LatLonUniforms,
+} from '../projections/latlon.js';
 
 const VS = /* glsl */ `#version 300 es
 in  vec2 aMercator;     // [0,1]² Web Mercator unit square
@@ -77,6 +81,40 @@ void main() {
 }
 `;
 
+const FS_LATLON = /* glsl */ `#version 300 es
+precision highp float;
+${LATLON_GLSL}
+
+uniform sampler2D uField;
+uniform sampler2D uLut;
+uniform vec2      uValueRange;
+uniform float     uOpacity;
+
+in  vec2 vMercator;
+out vec4 outColor;
+
+vec2 unprojectUnitMercator(vec2 xy) {
+  float lon = xy.x * 6.28318530718 - 3.14159265359;
+  float y   = 3.14159265359 * (1.0 - 2.0 * xy.y);
+  float lat = atan(sinh(y));
+  return vec2(lon, lat);
+}
+
+void main() {
+  vec2 lonLat = unprojectUnitMercator(vMercator);
+  vec2 uv = latlonToGrid(lonLat);
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
+
+  float v = texture(uField, uv).r;
+  if (isnan(v)) discard;
+
+  float t = (v - uValueRange.x) / max(1e-8, uValueRange.y - uValueRange.x);
+  t = clamp(t, 0.0, 1.0);
+  vec4 lut = texture(uLut, vec2(t, 0.5));
+  outColor = vec4(lut.rgb, lut.a * uOpacity);
+}
+`;
+
 export interface ScalarFieldLayerOptions {
   id?: string;
   colormap?: ColormapName;
@@ -100,14 +138,19 @@ export class ScalarFieldLayer implements CustomLayerInterface {
   private map: MlMap | null = null;
   private gl: WebGL2RenderingContext | null = null;
   private program: WebGLProgram | null = null;
+  private programLatLon: WebGLProgram | null = null;
   private vertexBuffer: WebGLBuffer | null = null;
   private indexBuffer: WebGLBuffer | null = null;
   private vao: WebGLVertexArrayObject | null = null;
+  private vaoLatLon: WebGLVertexArrayObject | null = null;
   private indexCount = 0;
 
   private fieldTex: FloatTexture | null = null;
   private lutTex: FloatTexture | null = null;
   private lcc: LccUniforms | null = null;
+  private latLonU: LatLonUniforms | null = null;
+  private latLonBounds: LatLonBounds | null = null;
+  private projectionMode: 'lcc' | 'latlon' = 'lcc';
 
   // Retain the decoded field on the CPU so we can sample it in click
   // handlers without a GPU readback. ~8 MB for HRRR CONUS (1799×1059 × 4 B) —
@@ -136,10 +179,12 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     this.gl = gl;
     enableFloatTextureExtensions(gl);
     this.program = buildProgram(gl, VS, FS, 'scalarField');
+    this.programLatLon = buildProgram(gl, VS, FS_LATLON, 'scalarFieldLatLon');
 
     this.vertexBuffer = gl.createBuffer();
     this.indexBuffer = gl.createBuffer();
     this.vao = gl.createVertexArray();
+    this.vaoLatLon = gl.createVertexArray();
     this.lutTex = createColormapTexture(gl, colormap(this.cmapName));
   }
 
@@ -156,6 +201,9 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     if (this.fieldTex) gl.deleteTexture(this.fieldTex.tex);
     this.fieldTex = createScalarTexture(gl, field.nx, field.ny, field.values);
     this.lcc = computeLccUniforms(grid);
+    this.latLonU = null;
+    this.latLonBounds = null;
+    this.projectionMode = 'lcc';
     this.valueRange = [field.min, field.max];
     this.fieldValues = field.values;
     this.fieldNx = field.nx;
@@ -212,6 +260,67 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     this.map?.triggerRepaint();
   }
 
+  /**
+   * Upload a new field on a regular lat/lon grid. Uses a simpler shader
+   * that maps (lon, lat) linearly to grid UV coordinates.
+   */
+  setDataLatLon(field: DecodedField, bounds: LatLonBounds): void {
+    if (!this.gl || !this.programLatLon) throw new Error('ScalarFieldLayer.setDataLatLon called before onAdd');
+    const gl = this.gl;
+
+    if (this.fieldTex) gl.deleteTexture(this.fieldTex.tex);
+    this.fieldTex = createScalarTexture(gl, field.nx, field.ny, field.values);
+    this.latLonU = computeLatLonUniforms(bounds);
+    this.latLonBounds = bounds;
+    this.lcc = null;
+    this.projectionMode = 'latlon';
+    this.valueRange = [field.min, field.max];
+    this.fieldValues = field.values;
+    this.fieldNx = field.nx;
+    this.fieldNy = field.ny;
+
+    const { mercMin, mercMax } = latLonBoundsToMercator(bounds);
+
+    const N = this.meshRes;
+    const verts = new Float32Array((N + 1) * (N + 1) * 2);
+    for (let j = 0; j <= N; j++) {
+      for (let i = 0; i <= N; i++) {
+        const tx = i / N;
+        const ty = j / N;
+        verts[(j * (N + 1) + i) * 2 + 0] = mercMin.x + (mercMax.x - mercMin.x) * tx;
+        verts[(j * (N + 1) + i) * 2 + 1] = mercMin.y + (mercMax.y - mercMin.y) * ty;
+      }
+    }
+    const indices = new Uint16Array(N * N * 6);
+    let k = 0;
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const a = j * (N + 1) + i;
+        const b = a + 1;
+        const c = a + (N + 1);
+        const d = c + 1;
+        indices[k++] = a; indices[k++] = b; indices[k++] = c;
+        indices[k++] = b; indices[k++] = d; indices[k++] = c;
+      }
+    }
+    this.indexCount = indices.length;
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.DYNAMIC_DRAW);
+
+    gl.bindVertexArray(this.vaoLatLon);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.vertexBuffer);
+    const loc = gl.getAttribLocation(this.programLatLon, 'aMercator');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+    gl.bindVertexArray(null);
+
+    this.map?.triggerRepaint();
+  }
+
   setColormap(name: ColormapName): void {
     this.cmapName = name;
     if (this.gl && this.lutTex) {
@@ -237,8 +346,17 @@ export class ScalarFieldLayer implements CustomLayerInterface {
    * — useful for callers that want to reject partial reads on grid edges.
    */
   sampleAt(lonDeg: number, latDeg: number): { value: number; i: number; j: number; missing: number } | null {
-    if (!this.fieldValues || !this.lcc) return null;
-    const { u, v } = lonLatToGridUV(this.lcc, lonDeg, latDeg);
+    if (!this.fieldValues) return null;
+    let u: number, v: number;
+    if (this.projectionMode === 'latlon' && this.latLonBounds) {
+      const uv = lonLatToGridUVLatLon(this.latLonBounds, lonDeg, latDeg);
+      u = uv.u; v = uv.v;
+    } else if (this.lcc) {
+      const uv = lonLatToGridUV(this.lcc, lonDeg, latDeg);
+      u = uv.u; v = uv.v;
+    } else {
+      return null;
+    }
     if (u < 0 || u > 1 || v < 0 || v > 1) return null;
 
     const nx = this.fieldNx, ny = this.fieldNy;
@@ -274,32 +392,44 @@ export class ScalarFieldLayer implements CustomLayerInterface {
   render(glAny: WebGL2RenderingContext | WebGLRenderingContext, matrix: mat4): void {
     const gl = glAny as WebGL2RenderingContext;
     if (!this.visible) return;
-    if (!this.program || !this.fieldTex || !this.lutTex || !this.lcc || !this.indexCount) return;
+    if (!this.fieldTex || !this.lutTex || !this.indexCount) return;
 
-    gl.useProgram(this.program);
-    gl.bindVertexArray(this.vao);
+    const useLatLon = this.projectionMode === 'latlon';
+    const prog = useLatLon ? this.programLatLon : this.program;
+    const vao = useLatLon ? this.vaoLatLon : this.vao;
+    if (!prog) return;
+    if (useLatLon && !this.latLonU) return;
+    if (!useLatLon && !this.lcc) return;
+
+    gl.useProgram(prog);
+    gl.bindVertexArray(vao);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.fieldTex.tex);
-    gl.uniform1i(gl.getUniformLocation(this.program, 'uField'), 0);
+    gl.uniform1i(gl.getUniformLocation(prog, 'uField'), 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex.tex);
-    gl.uniform1i(gl.getUniformLocation(this.program, 'uLut'), 1);
+    gl.uniform1i(gl.getUniformLocation(prog, 'uLut'), 1);
 
-    gl.uniformMatrix4fv(gl.getUniformLocation(this.program, 'uMatrix'), false, matrix as Float32Array);
-    gl.uniform2f(gl.getUniformLocation(this.program, 'uValueRange'), this.valueRange[0], this.valueRange[1]);
-    gl.uniform1f(gl.getUniformLocation(this.program, 'uOpacity'), this.opacity);
+    gl.uniformMatrix4fv(gl.getUniformLocation(prog, 'uMatrix'), false, matrix as Float32Array);
+    gl.uniform2f(gl.getUniformLocation(prog, 'uValueRange'), this.valueRange[0], this.valueRange[1]);
+    gl.uniform1f(gl.getUniformLocation(prog, 'uOpacity'), this.opacity);
 
-    const u = this.lcc;
-    gl.uniform1f(gl.getUniformLocation(this.program, 'uLccN'), u.n);
-    gl.uniform1f(gl.getUniformLocation(this.program, 'uLccF'), u.F);
-    gl.uniform1f(gl.getUniformLocation(this.program, 'uLccRho0'), u.rho0);
-    gl.uniform1f(gl.getUniformLocation(this.program, 'uLccLambda0'), u.lambda0);
-    gl.uniform1f(gl.getUniformLocation(this.program, 'uLccRadius'), u.radius);
-    gl.uniform2f(gl.getUniformLocation(this.program, 'uLccOrigin'), u.originX, u.originY);
-    gl.uniform2f(gl.getUniformLocation(this.program, 'uLccStep'), u.dx, u.dy);
-    gl.uniform2f(gl.getUniformLocation(this.program, 'uLccGridSize'), u.nx, u.ny);
-    gl.uniform2f(gl.getUniformLocation(this.program, 'uLccScan'), u.scanX, u.scanY);
+    if (useLatLon) {
+      const u = this.latLonU!;
+      gl.uniform4f(gl.getUniformLocation(prog, 'uLatLonBounds'), u.lonMin, u.lonMax, u.latMin, u.latMax);
+    } else {
+      const u = this.lcc!;
+      gl.uniform1f(gl.getUniformLocation(prog, 'uLccN'), u.n);
+      gl.uniform1f(gl.getUniformLocation(prog, 'uLccF'), u.F);
+      gl.uniform1f(gl.getUniformLocation(prog, 'uLccRho0'), u.rho0);
+      gl.uniform1f(gl.getUniformLocation(prog, 'uLccLambda0'), u.lambda0);
+      gl.uniform1f(gl.getUniformLocation(prog, 'uLccRadius'), u.radius);
+      gl.uniform2f(gl.getUniformLocation(prog, 'uLccOrigin'), u.originX, u.originY);
+      gl.uniform2f(gl.getUniformLocation(prog, 'uLccStep'), u.dx, u.dy);
+      gl.uniform2f(gl.getUniformLocation(prog, 'uLccGridSize'), u.nx, u.ny);
+      gl.uniform2f(gl.getUniformLocation(prog, 'uLccScan'), u.scanX, u.scanY);
+    }
 
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -327,6 +457,8 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);
     if (this.indexBuffer) gl.deleteBuffer(this.indexBuffer);
     if (this.vao) gl.deleteVertexArray(this.vao);
+    if (this.vaoLatLon) gl.deleteVertexArray(this.vaoLatLon);
     if (this.program) gl.deleteProgram(this.program);
+    if (this.programLatLon) gl.deleteProgram(this.programLatLon);
   }
 }
