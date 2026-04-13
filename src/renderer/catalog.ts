@@ -6,7 +6,13 @@
 
 import type { ColormapName } from './colormaps.js';
 import { accForecastQuery } from '../grib2/idx.js';
+import {
+  getUnitPref, convertTemp, convertSpeed, convertLength, convertDistance,
+  unitLabel,
+} from '../demo/units.js';
+import type { Dimension } from '../demo/units.js';
 
+export type { Dimension };
 export type LayerKind = 'scalar' | 'wind';
 
 export interface LayerQuery {
@@ -35,8 +41,13 @@ export interface CatalogVariable {
   /** Ordered from surface (index 0) to upper atmosphere. */
   levels: VariableLevel[];
   colormap?: ColormapName;
+  /** Fixed range in native units (K for temp, m/s for speed, etc.). */
   range?: [number, number];
+  /** Physical dimension — drives unit conversion. */
+  dimension?: Dimension | 'percent' | 'none';
+  /** Legacy display unit string (used as fallback when dimension is not set). */
   unit?: string;
+  /** Format a raw (native-unit) value for display, respecting the current unit pref. */
   format?: (v: number) => string;
   /** Data source. Defaults to 'hrrr'. */
   source?: 'hrrr' | 'ofs';
@@ -44,24 +55,89 @@ export interface CatalogVariable {
   ofsModel?: string;
 }
 
-// ---- helpers ----------------------------------------------------------------
+// ---- unit-aware helpers -----------------------------------------------------
 
-const K_TO_C = (k: number): number => k - 273.15;
-const K_TO_F = (k: number): number => (k - 273.15) * 9 / 5 + 32;
-const fmtTemp = (v: number): string => `${K_TO_F(v).toFixed(1)} °F  (${K_TO_C(v).toFixed(1)} °C)`;
-const fmtTempC = (v: number): string => `${v.toFixed(1)} °C`;
+const fmtTemp = (v: number): string => {
+  const u = getUnitPref('temperature');
+  return `${convertTemp(v, u).toFixed(1)} ${unitLabel('temperature')}`;
+};
+
+const fmtSpeed = (v: number): string => {
+  const u = getUnitPref('speed');
+  return `${convertSpeed(v, u).toFixed(1)} ${unitLabel('speed')}`;
+};
+
+const fmtLength = (v: number): string => {
+  const u = getUnitPref('length');
+  return `${convertLength(v, u).toFixed(1)} ${unitLabel('length')}`;
+};
+
+const fmtDistance = (v: number): string => {
+  const u = getUnitPref('distance');
+  return `${convertDistance(v, u).toFixed(1)} ${unitLabel('distance')}`;
+};
+
+// Precip rate: native is kg/m2/s, convert to mm/hr then to user's length unit per hour
+const fmtPrecipRate = (v: number): string => {
+  const mmhr = v * 3600;
+  const u = getUnitPref('length');
+  return `${convertLength(mmhr, u).toFixed(2)} ${unitLabel('length')}/hr`;
+};
+
+// Snow depth: native is meters, convert to user's length unit
+const fmtSnowDepth = (v: number): string => {
+  const mm = v * 1000; // m -> mm
+  const u = getUnitPref('length');
+  return `${convertLength(mm, u).toFixed(1)} ${unitLabel('length')}`;
+};
+
 const fmtPct = (v: number): string => `${v.toFixed(0)} %`;
 const fmtDbz = (v: number): string => `${v.toFixed(1)} dBZ`;
-const KT_TO_MS = 0.514444;
-const fmtWind = (v: number): string => `${(v / KT_TO_MS).toFixed(1)} kt  (${v.toFixed(1)} m/s)`;
-const fmtMm = (v: number): string => `${v.toFixed(1)} mm`;
-const fmtM = (v: number): string => `${v.toFixed(0)} m`;
 const fmtJkg = (v: number): string => `${v.toFixed(0)} J/kg`;
 const fmtPas = (v: number): string => `${v.toFixed(2)} Pa/s`;
-const metersToMi = (v: number): string => `${(v / 1609.344).toFixed(1)} mi`;
 const fmtM2s2 = (v: number): string => `${v.toFixed(0)} m\u00B2/s\u00B2`;
-const fmtCm = (v: number): string => `${v.toFixed(1)} cm`;
-const fmtKgm2s = (v: number): string => `${(v * 3600).toFixed(2)} mm/hr`;
+
+// ---- display helpers for legend/ticks ---------------------------------------
+
+/**
+ * Convert a native-unit range to the user's preferred display units.
+ * Returns [displayMin, displayMax].
+ */
+export function displayRange(v: CatalogVariable): [number, number] {
+  if (!v.range) return [0, 1];
+  const [lo, hi] = v.range;
+  switch (v.dimension) {
+    case 'temperature': {
+      const u = getUnitPref('temperature');
+      return [convertTemp(lo, u), convertTemp(hi, u)];
+    }
+    case 'speed': {
+      const u = getUnitPref('speed');
+      return [convertSpeed(lo, u), convertSpeed(hi, u)];
+    }
+    case 'length': {
+      const u = getUnitPref('length');
+      return [convertLength(lo, u), convertLength(hi, u)];
+    }
+    case 'distance': {
+      const u = getUnitPref('distance');
+      return [convertDistance(lo, u), convertDistance(hi, u)];
+    }
+    default:
+      return [lo, hi];
+  }
+}
+
+/** Return the display unit label for the user's current preference. */
+export function displayUnit(v: CatalogVariable): string {
+  switch (v.dimension) {
+    case 'temperature': return unitLabel('temperature');
+    case 'speed':       return unitLabel('speed');
+    case 'length':      return unitLabel('length');
+    case 'distance':    return unitLabel('distance');
+    default:            return v.unit ?? '';
+  }
+}
 
 // ---- shorthand level builder ------------------------------------------------
 
@@ -79,7 +155,7 @@ export const CATALOG: CatalogVariable[] = [
   // Temperature
   {
     id: 'temperature', group: 'Temperature', label: 'Temperature', kind: 'scalar',
-    colormap: 'temperature', range: [203, 320], unit: '°F', format: fmtTemp,
+    colormap: 'temperature', range: [203, 320], dimension: 'temperature', format: fmtTemp,
     levels: [
       scalarLevel('2m', /^TMP$/, /^2 m above ground$/),
       scalarLevel('850 hPa', /^TMP$/, /^850 mb$/),
@@ -91,13 +167,13 @@ export const CATALOG: CatalogVariable[] = [
   },
   {
     id: 'freezing-lvl', group: 'Temperature', label: 'Freezing Level', kind: 'scalar',
-    colormap: 'viridis', range: [0, 5000], unit: 'm', format: fmtM,
+    colormap: 'viridis', range: [0, 5000], dimension: 'distance', format: fmtDistance,
     levels: [scalarLevel('0°C iso', /^HGT$/, /^0C isotherm$/)],
   },
 
   // Wind
   {
-    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', range: [0, 104], unit: 'kt',
+    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', range: [0, 104], dimension: 'speed',
     levels: [
       windLevel('10m', /^UGRD$/, /^VGRD$/, /^10 m above ground$/),
       windLevel('80m', /^UGRD$/, /^VGRD$/, /^80 m above ground$/),
@@ -110,21 +186,21 @@ export const CATALOG: CatalogVariable[] = [
   },
   {
     id: 'gust', group: 'Wind', label: 'Wind Gust', kind: 'scalar',
-    colormap: 'wind', range: [0, 104], unit: 'kt', format: fmtWind,
+    colormap: 'wind', range: [0, 104], dimension: 'speed', format: fmtSpeed,
     levels: [scalarLevel('Surface', /^GUST$/, /^surface$/)],
   },
 
   // Moisture
   {
     id: 'dewpoint', group: 'Moisture', label: 'Dew Point', kind: 'scalar',
-    colormap: 'temperature', range: [203, 320], unit: '°F', format: fmtTemp,
+    colormap: 'temperature', range: [203, 320], dimension: 'temperature', format: fmtTemp,
     levels: [
       scalarLevel('2m', /^DPT$/, /^2 m above ground$/),
     ],
   },
   {
     id: 'rh', group: 'Moisture', label: 'Relative Humidity', kind: 'scalar',
-    colormap: 'humidity', range: [0, 100], unit: '%', format: fmtPct,
+    colormap: 'humidity', range: [0, 100], dimension: 'percent', unit: '%', format: fmtPct,
     levels: [
       scalarLevel('2m', /^RH$/, /^2 m above ground$/),
       scalarLevel('850 hPa', /^RH$/, /^850 mb$/),
@@ -135,58 +211,63 @@ export const CATALOG: CatalogVariable[] = [
   // Instability
   {
     id: 'cape', group: 'Instability', label: 'CAPE', kind: 'scalar',
-    colormap: 'cape', range: [0, 5000], unit: 'J/kg', format: fmtJkg,
+    colormap: 'cape', range: [0, 5000], dimension: 'none', unit: 'J/kg', format: fmtJkg,
     levels: [scalarLevel('Surface', /^CAPE$/, /^surface$/)],
   },
   {
     id: 'cin', group: 'Instability', label: 'CIN', kind: 'scalar',
-    colormap: 'cin', range: [-500, 0], unit: 'J/kg', format: fmtJkg,
+    colormap: 'cin', range: [-500, 0], dimension: 'none', unit: 'J/kg', format: fmtJkg,
     levels: [scalarLevel('Surface', /^CIN$/, /^surface$/)],
   },
   {
     id: 'lftx', group: 'Instability', label: 'Lifted Index', kind: 'scalar',
-    colormap: 'turbo', range: [-10, 10], unit: '°C', format: fmtTempC,
+    colormap: 'turbo', range: [-10, 10], dimension: 'none', unit: '\u00B0C', format: (v: number) => `${v.toFixed(1)} \u00B0C`,
     levels: [scalarLevel('500-1000mb', /^LFTX$/, /^500-1000 mb$/)],
   },
   {
     id: 'helicity', group: 'Instability', label: 'Storm Rel. Helicity', kind: 'scalar',
-    colormap: 'cape', range: [0, 500], unit: 'm\u00B2/s\u00B2', format: fmtM2s2,
+    colormap: 'cape', range: [0, 500], dimension: 'none', unit: 'm\u00B2/s\u00B2', format: fmtM2s2,
     levels: [scalarLevel('0-3km', /^HLCY$/, /^3000-0 m above ground$/)],
   },
 
   // Precipitation
   {
     id: 'apcp', group: 'Precipitation', label: '1h Precipitation', kind: 'scalar',
-    colormap: 'precipitation', range: [0, 50], unit: 'mm', format: fmtMm,
+    colormap: 'precipitation', range: [0, 50], dimension: 'length', format: fmtLength,
     levels: [{ label: 'Surface', query: { parameter: /^APCP$/, level: /^surface$/, forecast: accForecastQuery } }],
   },
   {
     id: 'prate', group: 'Precipitation', label: 'Precip Rate', kind: 'scalar',
-    colormap: 'precipitation', range: [0, 0.01], unit: 'mm/hr', format: fmtKgm2s,
+    colormap: 'precipitation', range: [0, 0.01], dimension: 'none', unit: 'mm/hr', format: fmtPrecipRate,
     levels: [scalarLevel('Surface', /^PRATE$/, /^surface$/)],
   },
   {
+    id: 'snod', group: 'Precipitation', label: 'Snow Depth', kind: 'scalar',
+    colormap: 'snow', range: [0, 1], dimension: 'none', unit: '', format: fmtSnowDepth,
+    levels: [scalarLevel('Surface', /^SNOD$/, /^surface$/)],
+  },
+  {
     id: 'weasd', group: 'Precipitation', label: 'Snow Water Equiv.', kind: 'scalar',
-    colormap: 'snow', range: [0, 50], unit: 'mm', format: fmtMm,
+    colormap: 'snow', range: [0, 50], dimension: 'length', format: fmtLength,
     levels: [scalarLevel('Surface', /^WEASD$/, /^surface$/)],
   },
 
   // Radar
   {
     id: 'refc', group: 'Radar', label: 'Composite Reflectivity', kind: 'scalar',
-    colormap: 'turbo', range: [-10, 75], unit: 'dBZ', format: fmtDbz,
+    colormap: 'turbo', range: [-10, 75], dimension: 'none', unit: 'dBZ', format: fmtDbz,
     levels: [scalarLevel('Entire atm', /^REFC$/, /entire atmosphere/)],
   },
   {
     id: 'retop', group: 'Radar', label: 'Echo Top', kind: 'scalar',
-    colormap: 'viridis', range: [0, 20000], unit: 'm', format: fmtM,
+    colormap: 'viridis', range: [0, 20000], dimension: 'distance', format: fmtDistance,
     levels: [scalarLevel('Cloud top', /^RETOP$/, /^cloud top$/)],
   },
 
   // Clouds
   {
     id: 'cloud-cover', group: 'Clouds', label: 'Cloud Cover', kind: 'scalar',
-    colormap: 'cloud', range: [0, 100], unit: '%', format: fmtPct,
+    colormap: 'cloud', range: [0, 100], dimension: 'percent', unit: '%', format: fmtPct,
     levels: [
       scalarLevel('Total', /^TCDC$/, /entire atmosphere/),
       scalarLevel('Low', /^LCDC$/, /^low cloud layer$/),
@@ -196,14 +277,14 @@ export const CATALOG: CatalogVariable[] = [
   },
   {
     id: 'vis', group: 'Clouds', label: 'Surface Visibility', kind: 'scalar',
-    colormap: 'viridis', range: [0, 24000], unit: 'mi', format: metersToMi,
+    colormap: 'viridis', range: [0, 24000], dimension: 'distance', format: fmtDistance,
     levels: [scalarLevel('Surface', /^VIS$/, /^surface$/)],
   },
 
   // Lightning
   {
     id: 'lightning', group: 'Lightning', label: 'Lightning Threat', kind: 'scalar',
-    colormap: 'lightning', range: [0, 10], unit: 'fl/hr',
+    colormap: 'lightning', range: [0, 10], dimension: 'none', unit: 'fl/hr',
     format: (v: number) => `${v.toFixed(1)} flashes/hr`,
     levels: [scalarLevel('Entire Atm', /^LTNG$/, /^entire atmosphere$/)],
   },
@@ -211,7 +292,7 @@ export const CATALOG: CatalogVariable[] = [
   // Other
   {
     id: 'vvel', group: 'Other', label: 'Vertical Velocity', kind: 'scalar',
-    colormap: 'turbo', range: [-10, 10], unit: 'Pa/s', format: fmtPas,
+    colormap: 'turbo', range: [-10, 10], dimension: 'none', unit: 'Pa/s', format: fmtPas,
     levels: [
       scalarLevel('850 hPa', /^VVEL$/, /^850 mb$/),
       scalarLevel('700 hPa', /^VVEL$/, /^700 mb$/),
