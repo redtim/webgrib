@@ -143,6 +143,30 @@
       /* ---- tide station popups ---- */
       .tide-sparkline { margin-top: 4px; border-radius: 2px; background: rgba(22, 27, 34, 0.6); }
       .tide-loading { color: #8b949e; font-style: italic; padding: 4px 0; }
+
+      /* ---- station DOM markers ---- */
+      .station-marker {
+        display: flex; align-items: center; gap: 4px;
+        background: rgba(11, 13, 16, 0.88);
+        border: 1px solid #30363d; border-radius: 4px;
+        padding: 2px 5px 2px 3px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10px; white-space: nowrap;
+        cursor: pointer;
+      }
+      .station-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 14px; height: 14px; border-radius: 3px;
+        background: rgba(255,255,255,0.08);
+        font-size: 9px; font-weight: bold; flex-shrink: 0;
+      }
+      .station-val { color: #e6edf3; }
+      .station-anom { font-size: 9px; }
+      .station-marker-current { background: rgba(11, 13, 16, 0.65); border-color: rgba(48, 54, 61, 0.5); }
+      .station-arrow {
+        display: inline-block; font-size: 13px; line-height: 1;
+        font-weight: bold; flex-shrink: 0;
+      }
     </style>
   </head>
   <body>

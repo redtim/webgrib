@@ -173,7 +173,7 @@ export const CATALOG: CatalogVariable[] = [
 
   // Wind
   {
-    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', range: [0, 104], dimension: 'speed',
+    id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', range: [0, 18], dimension: 'speed',
     levels: [
       windLevel('10m', /^UGRD$/, /^VGRD$/, /^10 m above ground$/),
       windLevel('80m', /^UGRD$/, /^VGRD$/, /^80 m above ground$/),
@@ -186,7 +186,7 @@ export const CATALOG: CatalogVariable[] = [
   },
   {
     id: 'gust', group: 'Wind', label: 'Wind Gust', kind: 'scalar',
-    colormap: 'wind', range: [0, 104], dimension: 'speed', format: fmtSpeed,
+    colormap: 'wind', range: [0, 18], dimension: 'speed', format: fmtSpeed,
     levels: [scalarLevel('Surface', /^GUST$/, /^surface$/)],
   },
 
@@ -311,7 +311,7 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'apparent-wind', group: 'Ocean', label: 'Apparent Wind', kind: 'wind',
     source: 'ofs', ofsModel: 'apparent-wind',
-    colormap: 'wind', range: [0, 104], dimension: 'speed',
+    colormap: 'wind', range: [0, 18], dimension: 'speed',
     format: fmtSpeed,
     levels: [{ label: 'Surface' }],
   },

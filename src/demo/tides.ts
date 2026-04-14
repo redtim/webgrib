@@ -7,12 +7,14 @@
  * Per-station detail data is fetched on click from the CO-OPS Data API.
  */
 
+import maplibregl from 'maplibre-gl';
 import type { Map as MlMap, MapMouseEvent, GeoJSONSource } from 'maplibre-gl';
 import { generatePrediction, generateCurrentPrediction,
-  fetchHarmonics, fetchDatum, fetchCurrentHarmonics,
+  fetchHarmonics, fetchDatum, fetchCurrentHarmonics, getCurrentAzimuth,
   fetchCurrentSubordinateOffsets, fetchSubordinateOffsets,
+  promptCacheConsent,
 } from '../tides/noaa.js';
-import { computeAstro, predictTideHeightWithAstro, predictCurrentVelocityWithAstro, constituentSpeed } from '../tides/predict.js';
+import { computeAstro, predictTideHeightWithAstro, predictCurrentVelocityWithAstro } from '../tides/predict.js';
 import type { StationHarmonic, StationDatum, CurrentHarmonic, AstroParams } from '../tides/predict.js';
 
 // ---------------------------------------------------------------------------
@@ -87,11 +89,34 @@ export class TideStationManager {
   // Water level observation cache: station ID → { observed, predicted, time, fetchedAt }
   private waterLevelCache = new Map<string, { observed: number; predicted: number; time: string; fetchedAt: number }>();
   private fetching = new Set<string>(); // stations currently being fetched
+  // Active popup state — so we can re-render when forecast time changes
+  private activePopup: {
+    type: TideLayerType;
+    stationId: string;
+    stationType: string;
+    popupId: string;
+    color: string;
+    series: Array<{ t: number; v: number }>;
+    floodDir?: number;
+    ebbDir?: number;
+  } | null = null;
+  // DOM markers for water level / tide labels (keyed by station ID)
+  private domMarkers = new Map<string, maplibregl.Marker>();
+  // Popup callback — set by handleClick, reused by DOM marker clicks
+  private showPopupFn: ((lngLat: { lng: number; lat: number }, html: string) => void) | null = null;
 
   attach(map: MlMap): void {
     this.map = map;
-    // When the user finishes panning/zooming, fetch harmonics for newly visible stations
-    map.on('moveend', () => { void this.fetchVisibleHarmonics(); });
+    map.on('moveend', () => {
+      void this.fetchVisibleHarmonics();
+      this.declutterMarkers();
+    });
+    map.on('zoom', () => { this.declutterMarkers(); });
+  }
+
+  /** Set the popup callback used by DOM marker clicks. Call after attach. */
+  setPopupCallback(fn: (lngLat: { lng: number; lat: number }, html: string) => void): void {
+    this.showPopupFn = fn;
   }
 
   // ---------------------------------------------------------------------- UI
@@ -134,6 +159,9 @@ export class TideStationManager {
 
     if (visible) {
       this.enabledLayers.add(type);
+      if (type === 'tidepredictions' || type === 'currentpredictions') {
+        promptCacheConsent();
+      }
       try {
         await this.ensureMetadata(type);
         this.addMapLayers(type);
@@ -197,170 +225,27 @@ export class TideStationManager {
     const cfg = LAYER_CONFIGS[type];
     const fc = this.stationCache.get(type)!;
 
+    // All types use DOM markers — no clustering needed
     map.addSource(sid, {
       type: 'geojson',
       data: fc,
-      cluster: true,
-      clusterMaxZoom: 8,
-      clusterRadius: 50,
+      cluster: false,
     });
 
-    // Cluster circles
-    map.addLayer({
-      id: this.clusterLayerId(type),
-      type: 'circle',
-      source: sid,
-      filter: ['has', 'point_count'],
-      paint: {
-        'circle-color': cfg.color,
-        'circle-opacity': 0.5,
-        'circle-radius': ['step', ['get', 'point_count'], 14, 10, 18, 50, 24],
-      },
-    });
-
-    // Cluster count labels
-    map.addLayer({
-      id: this.clusterCountLayerId(type),
-      type: 'symbol',
-      source: sid,
-      filter: ['has', 'point_count'],
-      layout: {
-        'text-field': '{point_count_abbreviated}',
-        'text-font': ['Noto Sans Regular'],
-        'text-size': 11,
-      },
-      paint: { 'text-color': '#ffffff' },
-    });
-
-    // Individual station dots
-    // For currents and water levels: hide the dot once we have data — text replaces it
-    const circleColor = type === 'tidepredictions'
-      ? ['case', ['has', 'tideHeight'],
-          ['interpolate', ['linear'], ['get', 'tideHeight'],
-            -4, '#2166ac', -2, '#67a9cf', 0, '#f7f7f7', 2, '#ef8a62', 4, '#b2182b'],
-          cfg.color] as unknown as string
-      : cfg.color;
-
-    const hideWhenData = type === 'currentpredictions' || type === 'waterlevels';
-    const circleOpacity = hideWhenData
-      ? ['case', ['get', 'hasData'], 0, 0.85] as unknown as number
-      : 0.9;
-
+    // Circle dots — only shown for stations without data yet
     map.addLayer({
       id: this.pointLayerId(type),
       type: 'circle',
       source: sid,
-      filter: ['!', ['has', 'point_count']],
+      filter: ['!', ['get', 'hasData']],
       paint: {
-        'circle-color': circleColor,
-        'circle-radius': type === 'tidepredictions'
-          ? ['case', ['get', 'hasData'], 6, 4] as unknown as number
-          : 4,
-        'circle-stroke-width': hideWhenData
-          ? ['case', ['get', 'hasData'], 0, 1] as unknown as number
-          : 1,
+        'circle-color': cfg.color,
+        'circle-radius': 4,
+        'circle-stroke-width': 1,
         'circle-stroke-color': '#ffffff',
-        'circle-opacity': circleOpacity,
+        'circle-opacity': 0.85,
       },
     });
-
-    // Water level stations: observed height + anomaly text
-    if (type === 'waterlevels') {
-      map.addLayer({
-        id: `${sid}-labels`,
-        type: 'symbol',
-        source: sid,
-        filter: ['all', ['!', ['has', 'point_count']], ['has', 'wlObserved']],
-        layout: {
-          'text-field': ['concat',
-            ['number-format', ['get', 'wlObserved'], { 'min-fraction-digits': 1, 'max-fraction-digits': 1 }],
-            '\n',
-            ['case', ['>=', ['get', 'wlAnomaly'], 0], '+', ''],
-            ['number-format', ['get', 'wlAnomaly'], { 'min-fraction-digits': 1, 'max-fraction-digits': 1 }],
-          ] as unknown as string,
-          'text-font': ['Noto Sans Regular'],
-          'text-size': 10,
-          'text-line-height': 1.2,
-          'text-anchor': 'center',
-          'text-allow-overlap': true,
-        },
-        paint: {
-          'text-color': ['interpolate', ['linear'], ['get', 'wlAnomaly'],
-            -1.5, '#67a9cf', -0.3, '#e6edf3', 0.3, '#e6edf3', 1.5, '#ef8a62',
-          ] as unknown as string,
-          'text-halo-color': 'rgba(0,0,0,0.85)',
-          'text-halo-width': 1.2,
-        },
-      });
-    }
-
-    // Tide value labels at high zoom
-    if (type === 'tidepredictions') {
-      map.addLayer({
-        id: `${sid}-labels`,
-        type: 'symbol',
-        source: sid,
-        filter: ['!', ['has', 'point_count']],
-        minzoom: 8,
-        layout: {
-          'text-field': ['case', ['has', 'tideHeight'],
-            ['number-format', ['get', 'tideHeight'], { 'min-fraction-digits': 1, 'max-fraction-digits': 1 }],
-            ''] as unknown as string,
-          'text-font': ['Noto Sans Regular'],
-          'text-size': 10,
-          'text-offset': [0, -1.2],
-          'text-anchor': 'bottom',
-        },
-        paint: {
-          'text-color': '#e6edf3',
-          'text-halo-color': 'rgba(0,0,0,0.8)',
-          'text-halo-width': 1,
-        },
-      });
-    }
-
-    // Current stations: arrow with speed label — replaces the dot when data is available
-    if (type === 'currentpredictions') {
-      this.ensureArrowIcon(map);
-
-      // Combined arrow + speed text layer
-      map.addLayer({
-        id: `${sid}-arrows`,
-        type: 'symbol',
-        source: sid,
-        filter: ['all', ['!', ['has', 'point_count']], ['has', 'currentDir']],
-        layout: {
-          'icon-image': 'current-arrow',
-          'icon-size': ['interpolate', ['linear'], ['get', 'currentSpeed'],
-            0, 0.35, 1.0, 0.55, 3.0, 0.8] as unknown as number,
-          'icon-rotate': ['get', 'currentDir'] as unknown as number,
-          'icon-rotation-alignment': 'map',
-          'icon-allow-overlap': true,
-          'text-field': ['number-format', ['get', 'currentSpeed'],
-            { 'min-fraction-digits': 1, 'max-fraction-digits': 1 }] as unknown as string,
-          'text-font': ['Noto Sans Regular'],
-          'text-size': 10,
-          'text-offset': [0, 1.2],
-          'text-anchor': 'top',
-          'text-allow-overlap': true,
-        },
-        paint: {
-          'icon-color': ['interpolate', ['linear'], ['get', 'currentSpeed'],
-            0, '#8b949e', 0.5, '#79c0ff', 1.0, '#7ee787', 2.0, '#f0c040', 3.0, '#ff7b72',
-          ] as unknown as string,
-          'icon-opacity': 0.95,
-          'text-color': ['interpolate', ['linear'], ['get', 'currentSpeed'],
-            0, '#8b949e', 0.5, '#79c0ff', 1.0, '#7ee787', 2.0, '#f0c040', 3.0, '#ff7b72',
-          ] as unknown as string,
-          'text-halo-color': 'rgba(0,0,0,0.85)',
-          'text-halo-width': 1.2,
-        },
-      });
-    }
-
-    // Pointer cursor on station hover
-    map.on('mouseenter', this.pointLayerId(type), () => { map.getCanvas().style.cursor = 'pointer'; });
-    map.on('mouseleave', this.pointLayerId(type), () => { map.getCanvas().style.cursor = ''; });
   }
 
   /** Create the current arrow SDF icon if not already added to the map. */
@@ -384,6 +269,8 @@ export class TideStationManager {
     map.addImage('current-arrow', { width: size, height: size, data: new Uint8Array(imgData.data.buffer) }, { sdf: true });
   }
 
+
+
   private removeMapLayers(type: TideLayerType): void {
     const map = this.map!;
     const sid = this.sourceId(type);
@@ -395,6 +282,18 @@ export class TideStationManager {
       if (map.getLayer(id)) map.removeLayer(id);
     }
     if (map.getSource(sid)) map.removeSource(sid);
+    this.clearDomMarkers(type);
+  }
+
+  /** Remove all DOM markers for a layer type. */
+  private clearDomMarkers(type: TideLayerType): void {
+    const prefix = `${type}:`;
+    for (const [key, marker] of this.domMarkers) {
+      if (key.startsWith(prefix)) {
+        marker.remove();
+        this.domMarkers.delete(key);
+      }
+    }
   }
 
   // --------------------------------------------------- forecast predictions
@@ -406,58 +305,65 @@ export class TideStationManager {
   setForecastTime(date: Date): void {
     this.forecastDate = date;
     this.updateAllPredictions();
+    this.refreshActivePopup();
   }
 
   /**
    * Fetch harmonic data for visible stations that haven't been fetched yet.
-   * Batches requests with a concurrency limit to avoid hammering NOAA.
+   * Each layer type is processed independently so slow types don't block others.
    */
   private async fetchVisibleHarmonics(): Promise<void> {
     const map = this.map;
     if (!map) return;
 
-    const toFetch: Array<{ id: string; type: TideLayerType; stationType: string }> = [];
-
+    // Launch each type independently — water levels won't wait behind tides
+    const tasks: Promise<void>[] = [];
     for (const type of this.enabledLayers) {
-      const fc = this.stationCache.get(type);
-      if (!fc) continue;
+      tasks.push(this.fetchVisibleForType(type));
+    }
+    await Promise.allSettled(tasks);
+  }
 
-      // Get station IDs visible in the viewport (unclustered points only)
-      const layerId = this.pointLayerId(type);
-      if (!map.getLayer(layerId)) continue;
+  private async fetchVisibleForType(type: TideLayerType): Promise<void> {
+    const map = this.map;
+    if (!map) return;
 
-      const visible = map.queryRenderedFeatures(undefined, { layers: [layerId] });
-      for (const feat of visible) {
-        const props = feat.properties as { id: string; stationType: string };
-        const id = props.id;
-        if (!id) continue;
+    const fc = this.stationCache.get(type);
+    if (!fc) return;
 
-        if (type === 'waterlevels') {
-          const cached = this.waterLevelCache.get(id);
-          // Refetch if older than 6 minutes
-          if (cached && Date.now() - cached.fetchedAt < 6 * 60 * 1000) continue;
-          if (this.fetching.has(`wl:${id}`)) continue;
-        } else if (type === 'tidepredictions') {
-          if (this.tideHarmonics.has(id) || this.fetching.has(`tide:${id}`)) continue;
-        } else if (type === 'currentpredictions') {
-          if (props.stationType === 'W') continue;
-          if (this.currentHarmonics.has(id) || this.fetching.has(`cur:${id}`)) continue;
-        }
+    const toFetch: Array<{ id: string; stationType: string }> = [];
+    const bounds = map.getBounds();
 
-        toFetch.push({ id, type, stationType: props.stationType });
+    // All types use DOM markers — iterate FeatureCollection directly
+    for (const feat of fc.features) {
+      const coords = (feat.geometry as GeoJSON.Point).coordinates;
+      if (!bounds.contains([coords[0]!, coords[1]!] as [number, number])) continue;
+      const props = feat.properties as { id: string; stationType: string };
+      const id = props.id;
+      if (!id) continue;
+
+      if (type === 'waterlevels') {
+        const cached = this.waterLevelCache.get(id);
+        if (cached && Date.now() - cached.fetchedAt < 6 * 60 * 1000) continue;
+        if (this.fetching.has(`wl:${id}`)) continue;
+      } else if (type === 'tidepredictions') {
+        if (this.tideHarmonics.has(id) || this.fetching.has(`tide:${id}`)) continue;
+      } else if (type === 'currentpredictions') {
+        if ((props.stationType ?? '') === 'W') continue;
+        if (this.currentHarmonics.has(id) || this.fetching.has(`cur:${id}`)) continue;
       }
+      toFetch.push({ id, stationType: props.stationType ?? 'R' });
     }
 
     if (toFetch.length === 0) return;
 
-    // Batch fetch with concurrency limit
     const CONCURRENCY = 15;
     for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
       const batch = toFetch.slice(i, i + CONCURRENCY);
-      await Promise.allSettled(batch.map((s) => this.fetchStationHarmonics(s.id, s.type, s.stationType)));
+      await Promise.allSettled(batch.map((s) => this.fetchStationHarmonics(s.id, type, s.stationType)));
+      // Update predictions after each batch so markers appear progressively
+      this.updateAllPredictions();
     }
-
-    this.updateAllPredictions();
   }
 
   private async fetchStationHarmonics(id: string, type: TideLayerType, stationType: string): Promise<void> {
@@ -538,23 +444,9 @@ export class TideStationManager {
       this.fetching.add(key);
       try {
         if (stationType === 'H') {
-          // Fetch harcon once — extract both harmonics and azimuth from the same response
-          const url = `https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/${id}/harcon.json`;
-          const resp = await fetch(url);
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const data = await resp.json();
-          const hcList = data?.HarmonicConstituents ?? [];
-          let floodDir = 0, ebbDir = 180;
-          const harmonics: CurrentHarmonic[] = [];
-          for (const c of hcList) {
-            if ((c.binNbr ?? 1) !== 1 || !c.constituentName || c.majorAmplitude == null) continue;
-            if (floodDir === 0 && c.azi != null) { floodDir = c.azi; ebbDir = (c.azi + 180) % 360; }
-            const speed = constituentSpeed(c.constituentName);
-            if (speed > 0) {
-              harmonics.push({ name: c.constituentName, majorAmplitude: c.majorAmplitude, majorPhaseGMT: c.majorPhaseGMT ?? 0, speed });
-            }
-          }
-          if (harmonics.length > 0) this.currentHarmonics.set(id, { harmonics, floodDir, ebbDir });
+          const harmonics = await fetchCurrentHarmonics(id);
+          const azi = getCurrentAzimuth(id) ?? { floodDir: 0, ebbDir: 180 };
+          if (harmonics.length > 0) this.currentHarmonics.set(id, { harmonics, ...azi });
         } else if (stationType === 'S') {
           const offsets = await fetchCurrentSubordinateOffsets(id);
           if (offsets) {
@@ -624,6 +516,125 @@ export class TideStationManager {
       const sid = this.sourceId(type);
       const source = map.getSource(sid) as GeoJSONSource | undefined;
       if (source) source.setData(fc);
+
+      // Update DOM markers for all station types
+      this.updateDomMarkers(type, fc);
+    }
+  }
+
+  /** Create or update DOM markers with rich HTML labels. */
+  private updateDomMarkers(type: TideLayerType, fc: GeoJSON.FeatureCollection): void {
+    const map = this.map;
+    if (!map) return;
+    const cfg = LAYER_CONFIGS[type];
+
+    for (const feat of fc.features) {
+      const props = feat.properties as Record<string, unknown>;
+      if (!props['hasData']) continue;
+
+      const id = props['id'] as string;
+      const coords = (feat.geometry as GeoJSON.Point).coordinates;
+      const key = `${type}:${id}`;
+
+      let html: string;
+      let markerClass = 'station-marker';
+      if (type === 'waterlevels') {
+        const observed = props['wlObserved'] as number;
+        const anomaly = props['wlAnomaly'] as number;
+        const anomalyColor = anomaly >= 0 ? '#7ee787' : '#ff7b72';
+        const anomalySign = anomaly >= 0 ? '+' : '';
+        html = `<span class="station-badge" style="color:${cfg.color}">W</span>`
+          + `<span class="station-val">${observed.toFixed(1)}</span>`
+          + `<span class="station-anom" style="color:${anomalyColor}">${anomalySign}${anomaly.toFixed(1)}</span>`;
+      } else if (type === 'currentpredictions') {
+        const speed = props['currentSpeed'] as number;
+        const dir = props['currentDir'] as number;
+        const speedColor = speed < 0.3 ? '#8b949e' : speed < 1 ? '#79c0ff' : speed < 2 ? '#7ee787' : speed < 3 ? '#f0c040' : '#ff7b72';
+        html = `<span class="station-badge" style="color:${cfg.color}">C</span>`
+          + `<span class="station-arrow" style="color:${speedColor};transform:rotate(${dir}deg)">&#x2191;</span>`
+          + `<span class="station-val" style="color:${speedColor}">${speed.toFixed(1)}</span>`;
+        markerClass = 'station-marker station-marker-current';
+      } else {
+        const height = props['tideHeight'] as number;
+        const valColor = height >= 0 ? '#7ee787' : '#ff7b72';
+        html = `<span class="station-badge" style="color:${cfg.color}">T</span>`
+          + `<span class="station-val" style="color:${valColor}">${height.toFixed(1)}</span>`;
+      }
+
+      const existing = this.domMarkers.get(key);
+      if (existing) {
+        existing.getElement().innerHTML = html;
+      } else {
+        const el = document.createElement('div');
+        el.className = markerClass;
+        el.innerHTML = html;
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this.showStationPopup(type, id, props as Record<string, unknown>, coords[0]!, coords[1]!);
+        });
+        const marker = new maplibregl.Marker({ element: el, anchor: 'left' })
+          .setLngLat([coords[0]!, coords[1]!])
+          .addTo(map);
+        this.domMarkers.set(key, marker);
+      }
+    }
+
+    this.declutterMarkers();
+  }
+
+  /**
+   * Hide DOM markers that overlap with each other. Projects each marker
+   * to screen coordinates and uses a simple greedy collision pass —
+   * first marker in wins, any that overlap it are hidden.
+   */
+  private declutterMarkers(): void {
+    const map = this.map;
+    if (!map) return;
+
+    // Collect all markers with their screen positions
+    const items: Array<{ key: string; marker: maplibregl.Marker; x: number; y: number; w: number; h: number }> = [];
+    const bounds = map.getBounds();
+
+    for (const [key, marker] of this.domMarkers) {
+      const lngLat = marker.getLngLat();
+      // Skip markers outside viewport
+      if (!bounds.contains(lngLat)) {
+        marker.getElement().style.display = 'none';
+        continue;
+      }
+      const pt = map.project(lngLat);
+      // Estimate width based on type (waterlevels has anomaly text, wider)
+      const isWl = key.startsWith('waterlevels:');
+      const w = isWl ? 95 : 50;
+      const h = 20;
+      items.push({ key, marker, x: pt.x, y: pt.y, w, h });
+    }
+
+    // Greedy collision detection — earlier items win
+    const occupied: Array<{ x: number; y: number; w: number; h: number }> = [];
+    const PAD = 4; // pixels of padding between markers
+
+    for (const item of items) {
+      const ax = item.x;
+      const ay = item.y - item.h / 2;
+      const aw = item.w + PAD;
+      const ah = item.h + PAD;
+
+      let collides = false;
+      for (const box of occupied) {
+        if (ax < box.x + box.w && ax + aw > box.x &&
+            ay < box.y + box.h && ay + ah > box.y) {
+          collides = true;
+          break;
+        }
+      }
+
+      if (collides) {
+        item.marker.getElement().style.display = 'none';
+      } else {
+        item.marker.getElement().style.display = '';
+        occupied.push({ x: ax, y: ay, w: aw, h: ah });
+      }
     }
   }
 
@@ -652,6 +663,8 @@ export class TideStationManager {
     map: MlMap,
     showPopup: (lngLat: { lng: number; lat: number }, html: string) => void,
   ): boolean {
+    this.showPopupFn = showPopup;
+    this.activePopup = null;
     const layerIds = this.getActivePointLayerIds().filter((id) => map.getLayer(id));
     if (layerIds.length === 0) return false;
 
@@ -719,6 +732,29 @@ export class TideStationManager {
 
     this.dataCache.set(cacheKey, { data, fetchedAt: Date.now() });
     return data;
+  }
+
+  /** Show a popup for a station clicked via a DOM marker. */
+  private showStationPopup(type: TideLayerType, stationId: string, props: Record<string, unknown>, lng: number, lat: number): void {
+    if (!this.showPopupFn) return;
+    this.activePopup = null;
+    const cfg = LAYER_CONFIGS[type];
+    const name = (props['name'] as string) ?? '';
+    const state = (props['state'] as string) ?? '';
+    const stationType = (props['stationType'] as string) ?? 'R';
+
+    const popupId = `tide-popup-${Date.now()}`;
+    const html = [
+      `<div class="inspect-title" style="color:${cfg.color}">${escapeHtml(name)}${state ? `, ${escapeHtml(state)}` : ''}</div>`,
+      `<div class="inspect-row"><span class="k">station</span><span>${escapeHtml(stationId)}</span></div>`,
+      `<div class="inspect-row"><span class="k">type</span><span>${escapeHtml(cfg.label)}</span></div>`,
+      `<div id="${popupId}" class="tide-loading">Loading data...</div>`,
+      `<canvas id="${popupId}-canvas" class="tide-sparkline" width="240" height="70" style="display:none"></canvas>`,
+      `<div style="margin-top:6px"><div class="inspect-row"><span class="k">lon, lat</span><span>${lng.toFixed(3)}, ${lat.toFixed(3)}</span></div></div>`,
+    ].join('');
+
+    this.showPopupFn({ lng, lat }, html);
+    void this.fetchAndRenderDetail(type, stationId, popupId, cfg.color, stationType);
   }
 
   private async fetchAndRenderDetail(
@@ -810,7 +846,7 @@ export class TideStationManager {
     const end = new Date(now + 42 * 3600000);    // 42 hours ahead
 
     const series = await generatePrediction(stationId, stationType, start, end, 6);
-    if (!document.getElementById(popupId)) return; // popup closed during fetch
+    if (!document.getElementById(popupId)) return;
 
     if (series.length === 0) {
       el.className = '';
@@ -818,42 +854,10 @@ export class TideStationManager {
       return;
     }
 
-    // Current level
-    const currentLevel = interpolateAtTime(
-      series.map((p) => ({ t: p.t, v: p.v })), now,
-    );
+    // Store for live updates when forecast time changes
+    this.activePopup = { type: 'tidepredictions', stationId, stationType, popupId, color, series };
 
-    // Find next high/low
-    const nextHigh = findNextExtreme(
-      series.map((p) => ({ t: p.t, v: p.v })), now, 'high',
-    );
-    const nextLow = findNextExtreme(
-      series.map((p) => ({ t: p.t, v: p.v })), now, 'low',
-    );
-
-    const rows: string[] = [];
-    if (currentLevel !== null) {
-      rows.push(`<div class="inspect-row"><span class="k">now</span><span>${currentLevel.toFixed(2)} ft MLLW</span></div>`);
-    }
-    if (nextHigh) {
-      rows.push(`<div class="inspect-row"><span class="k">next high</span><span>${nextHigh.v.toFixed(2)} ft @ ${formatTime(nextHigh.t)}</span></div>`);
-    }
-    if (nextLow) {
-      rows.push(`<div class="inspect-row"><span class="k">next low</span><span>${nextLow.v.toFixed(2)} ft @ ${formatTime(nextLow.t)}</span></div>`);
-    }
-
-    el.className = '';
-    el.innerHTML = rows.join('');
-
-    if (series.length > 1) {
-      this.drawSparkline(
-        popupId,
-        series.map((p) => p.t),
-        series.map((p) => p.v),
-        color,
-        now,
-      );
-    }
+    this.renderTidePopupContent(el, series, popupId, color, now);
   }
 
   private async renderLocalCurrentPrediction(
@@ -880,34 +884,101 @@ export class TideStationManager {
       return;
     }
 
-    const nowSpeed = interpolateAtTime(
-      series.map((p) => ({ t: p.t, v: p.v })), now,
-    );
-    const phase = nowSpeed !== null
-      ? (nowSpeed > 0.05 ? 'flood' : nowSpeed < -0.05 ? 'ebb' : 'slack')
-      : 'unknown';
+    // Store for live updates when forecast time changes
+    this.activePopup = { type: 'currentpredictions', stationId, stationType, popupId, color, series, floodDir, ebbDir };
+
+    this.renderCurrentPopupContent(el, series, popupId, color, now, floodDir, ebbDir);
+  }
+
+  /** Render tide popup text + sparkline (called on initial load and on forecast time change). */
+  private renderTidePopupContent(
+    el: HTMLElement,
+    series: Array<{ t: number; v: number }>,
+    popupId: string,
+    color: string,
+    nowMs: number,
+  ): void {
+    const mapped = series.map((p) => ({ t: p.t, v: p.v }));
+    const currentLevel = interpolateAtTime(mapped, nowMs);
+    const nextHigh = findNextExtreme(mapped, nowMs, 'high');
+    const nextLow = findNextExtreme(mapped, nowMs, 'low');
+
+    const rows: string[] = [];
+    if (currentLevel !== null) {
+      rows.push(`<div class="inspect-row"><span class="k">now (${formatTime(nowMs)})</span><span>${currentLevel.toFixed(2)} ft MLLW</span></div>`);
+    }
+    const fcMs = this.forecastDate.getTime();
+    if (Math.abs(fcMs - nowMs) > 30 * 60000) {
+      const fcLevel = interpolateAtTime(mapped, fcMs);
+      if (fcLevel !== null) {
+        rows.push(`<div class="inspect-row"><span class="k">@ ${formatTime(fcMs)}</span><span>${fcLevel.toFixed(2)} ft MLLW</span></div>`);
+      }
+    }
+    if (nextHigh) rows.push(`<div class="inspect-row"><span class="k">next high</span><span>${nextHigh.v.toFixed(2)} ft @ ${formatTime(nextHigh.t)}</span></div>`);
+    if (nextLow) rows.push(`<div class="inspect-row"><span class="k">next low</span><span>${nextLow.v.toFixed(2)} ft @ ${formatTime(nextLow.t)}</span></div>`);
+
+    el.className = '';
+    el.innerHTML = rows.join('');
+
+    if (series.length > 1) {
+      this.drawSparkline(popupId, series.map((p) => p.t), series.map((p) => p.v), color, nowMs, fcMs);
+    }
+  }
+
+  /** Render current popup text + sparkline. */
+  private renderCurrentPopupContent(
+    el: HTMLElement,
+    series: Array<{ t: number; v: number }>,
+    popupId: string,
+    color: string,
+    nowMs: number,
+    floodDir: number,
+    ebbDir: number,
+  ): void {
+    const mapped = series.map((p) => ({ t: p.t, v: p.v }));
+    const nowSpeed = interpolateAtTime(mapped, nowMs);
+    const phase = nowSpeed !== null ? (nowSpeed > 0.05 ? 'flood' : nowSpeed < -0.05 ? 'ebb' : 'slack') : 'unknown';
     const currentDir = phase === 'flood' ? floodDir : phase === 'ebb' ? ebbDir : null;
 
     const rows: string[] = [];
     if (nowSpeed !== null) {
-      rows.push(`<div class="inspect-row"><span class="k">speed</span><span>${Math.abs(nowSpeed).toFixed(2)} kt</span></div>`);
+      rows.push(`<div class="inspect-row"><span class="k">now (${formatTime(nowMs)})</span><span>${Math.abs(nowSpeed).toFixed(2)} kt ${phase}</span></div>`);
     }
-    rows.push(`<div class="inspect-row"><span class="k">phase</span><span>${phase}</span></div>`);
     if (currentDir !== null) {
       rows.push(`<div class="inspect-row"><span class="k">dir</span><span>${compassFromDeg(currentDir)} (${currentDir.toFixed(0)}\u00B0)</span></div>`);
+    }
+    const fcMs = this.forecastDate.getTime();
+    if (Math.abs(fcMs - nowMs) > 30 * 60000) {
+      const fcSpeed = interpolateAtTime(mapped, fcMs);
+      if (fcSpeed !== null) {
+        const fcPhase = fcSpeed > 0.05 ? 'flood' : fcSpeed < -0.05 ? 'ebb' : 'slack';
+        const fcDir = fcPhase === 'flood' ? floodDir : fcPhase === 'ebb' ? ebbDir : null;
+        let fcText = `${Math.abs(fcSpeed).toFixed(2)} kt ${fcPhase}`;
+        if (fcDir !== null) fcText += ` ${compassFromDeg(fcDir)}`;
+        rows.push(`<div class="inspect-row"><span class="k">@ ${formatTime(fcMs)}</span><span>${fcText}</span></div>`);
+      }
     }
 
     el.className = '';
     el.innerHTML = rows.join('');
 
     if (series.length > 1) {
-      this.drawSparkline(
-        popupId,
-        series.map((p) => p.t),
-        series.map((p) => p.v),
-        color,
-        now,
-      );
+      this.drawSparkline(popupId, series.map((p) => p.t), series.map((p) => p.v), color, nowMs, fcMs);
+    }
+  }
+
+  /** Re-render the active popup when the forecast time changes. */
+  private refreshActivePopup(): void {
+    const p = this.activePopup;
+    if (!p) return;
+    const el = document.getElementById(p.popupId);
+    if (!el) { this.activePopup = null; return; }
+
+    const now = Date.now();
+    if (p.type === 'tidepredictions') {
+      this.renderTidePopupContent(el, p.series, p.popupId, p.color, now);
+    } else if (p.type === 'currentpredictions') {
+      this.renderCurrentPopupContent(el, p.series, p.popupId, p.color, now, p.floodDir ?? 0, p.ebbDir ?? 180);
     }
   }
 
@@ -977,6 +1048,7 @@ export class TideStationManager {
     values: number[],
     color: string,
     nowMs?: number,
+    forecastMs?: number,
   ): void {
     const canvas = document.getElementById(`${popupId}-canvas`) as HTMLCanvasElement | null;
     if (!canvas) return;
@@ -1062,6 +1134,25 @@ export class TideStationManager {
       ctx.font = '8px ui-monospace, monospace';
       ctx.textAlign = 'center';
       ctx.fillText('now', nx, h - 2);
+    }
+
+    // Forecast time marker
+    if (forecastMs !== undefined && forecastMs >= tMin && forecastMs <= tMax
+        && (nowMs === undefined || Math.abs(forecastMs - nowMs) > 30 * 60000)) {
+      const fx = toX(forecastMs);
+      ctx.strokeStyle = 'rgba(126, 231, 135, 0.6)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath();
+      ctx.moveTo(fx, pad.top);
+      ctx.lineTo(fx, h - pad.bottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = '#7ee787';
+      ctx.font = '8px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('fcst', fx, pad.top - 1);
     }
 
     // Y-axis labels

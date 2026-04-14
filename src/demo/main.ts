@@ -30,10 +30,10 @@ import { TideStationManager } from './tides.js';
 
 // Wind speed raster range in m/s — must match WIND_MAX_MS in colormaps.ts.
 const KT_TO_MS = 0.514444;
-const WIND_RANGE_MS: [number, number] = [0, 104];
+const WIND_MAX = 35 * KT_TO_MS; // 18 m/s = 35 kt
 
 // Wind tick marks in m/s (native unit) — converted to display unit dynamically
-const WIND_TICK_MS = [0, 2.57, 5.14, 10.29, 15.43, 20.58, 30.87]; // ~0,5,10,20,30,40,60 kt
+const WIND_TICK_MS = [0, 2.57, 5.14, 7.72, 10.29, 12.86, 15.43, 18.01]; // ~0,5,10,15,20,25,30,35 kt
 
 /** Build wind legend args in the user's current speed unit. */
 function windLegendArgs(): [number, number, string, LegendTick[]] {
@@ -42,7 +42,7 @@ function windLegendArgs(): [number, number, string, LegendTick[]] {
     const v = convertSpeed(ms, u);
     return { value: v, label: Math.round(v).toString() };
   });
-  const maxDisplay = convertSpeed(104, u);
+  const maxDisplay = convertSpeed(WIND_MAX, u);
   return [0, maxDisplay, unitLabel('speed'), ticks];
 }
 
@@ -600,6 +600,10 @@ async function main(): Promise<void> {
       .addTo(map);
   };
 
+  // Wire popup callback for DOM marker clicks (water level / tide stations)
+  tideManager?.setPopupCallback((lngLat, html) =>
+    showPopup(new maplibregl.LngLat(lngLat.lng, lngLat.lat), html));
+
   map.on('click', (ev) => {
     // Check tide station layers first — they handle their own popup
     if (tideManager.handleClick(ev, map, (lngLat, html) => showPopup(new maplibregl.LngLat(lngLat.lng, lngLat.lat), html))) {
@@ -660,7 +664,7 @@ async function main(): Promise<void> {
 
   // ---- auto-load default variable on startup --------------------------------
 
-  const defaultVar = findVariable('temperature') ?? CATALOG[0];
+  const defaultVar = findVariable('wind') ?? CATALOG[0];
   if (defaultVar) {
     currentVariable = defaultVar;
     panel.setActive(defaultVar.id);

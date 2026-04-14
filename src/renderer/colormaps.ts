@@ -131,30 +131,31 @@ const TEMP_STOPS: Array<{ t: number; rgb: [number, number, number] }> = [
   { t: (303    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [232, 83, 25] },   // 303 K =  30°C
   { t: (320    - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), rgb: [71, 14, 0] },     // 320 K =  47°C
 ];
-// Wind palette — exact RGB stops keyed by m/s. Positions are fractions of the
-// display range (WIND_MAX_MS). Data from GRIB is already in m/s.
-const WIND_MAX_MS = 104; // palette spans 0–104 m/s
+// Wind palette — 0–35 kt (0–18 m/s). Exact RGB values sampled from reference image.
+const KT = 0.514444; // 1 knot in m/s
+const WIND_MAX_MS = 35 * KT; // 18.006 m/s
 const WIND_STOPS: Array<{ t: number; rgb: [number, number, number] }> = [
-  { t:   0 / WIND_MAX_MS, rgb: [98, 113, 183] },   //   0 m/s
-  { t:   1 / WIND_MAX_MS, rgb: [57, 97, 159] },     //   1 m/s
-  { t:   3 / WIND_MAX_MS, rgb: [74, 148, 169] },    //   3 m/s
-  { t:   5 / WIND_MAX_MS, rgb: [77, 141, 123] },    //   5 m/s
-  { t:   7 / WIND_MAX_MS, rgb: [83, 165, 83] },     //   7 m/s
-  { t:   9 / WIND_MAX_MS, rgb: [53, 159, 53] },     //   9 m/s
-  { t:  11 / WIND_MAX_MS, rgb: [167, 157, 81] },    //  11 m/s
-  { t:  13 / WIND_MAX_MS, rgb: [159, 127, 58] },    //  13 m/s
-  { t:  15 / WIND_MAX_MS, rgb: [161, 108, 92] },    //  15 m/s
-  { t:  17 / WIND_MAX_MS, rgb: [129, 58, 78] },     //  17 m/s
-  { t:  19 / WIND_MAX_MS, rgb: [175, 80, 136] },    //  19 m/s
-  { t:  21 / WIND_MAX_MS, rgb: [117, 74, 147] },    //  21 m/s
-  { t:  24 / WIND_MAX_MS, rgb: [109, 97, 163] },    //  24 m/s
-  { t:  27 / WIND_MAX_MS, rgb: [68, 105, 141] },    //  27 m/s
-  { t:  29 / WIND_MAX_MS, rgb: [92, 144, 152] },    //  29 m/s
-  { t:  36 / WIND_MAX_MS, rgb: [125, 68, 165] },    //  36 m/s
-  { t:  46 / WIND_MAX_MS, rgb: [231, 215, 215] },   //  46 m/s
-  { t:  51 / WIND_MAX_MS, rgb: [219, 212, 135] },   //  51 m/s
-  { t:  77 / WIND_MAX_MS, rgb: [205, 202, 112] },   //  77 m/s
-  { t: 104 / WIND_MAX_MS, rgb: [128, 128, 128] },   // 104 m/s
+  { t:  0 * KT / WIND_MAX_MS, rgb: [255, 255, 255] },  //  0 kt
+  { t:  2 * KT / WIND_MAX_MS, rgb: [203, 203, 251] },  //  2 kt
+  { t:  3 * KT / WIND_MAX_MS, rgb: [203, 203, 251] },  //  3 kt
+  { t:  5 * KT / WIND_MAX_MS, rgb: [217, 251, 250] },  //  5 kt
+  { t:  7 * KT / WIND_MAX_MS, rgb: [161, 245, 208] },  //  7 kt
+  { t:  9 * KT / WIND_MAX_MS, rgb: [121, 249, 112] },  //  9 kt
+  { t: 10 * KT / WIND_MAX_MS, rgb: [121, 249, 112] },  // 10 kt
+  { t: 12 * KT / WIND_MAX_MS, rgb: [117, 251,  76] },  // 12 kt
+  { t: 14 * KT / WIND_MAX_MS, rgb: [215, 242,  78] },  // 14 kt
+  { t: 16 * KT / WIND_MAX_MS, rgb: [247, 204,  71] },  // 16 kt
+  { t: 17 * KT / WIND_MAX_MS, rgb: [247, 204,  71] },  // 17 kt
+  { t: 19 * KT / WIND_MAX_MS, rgb: [241, 155,  61] },  // 19 kt
+  { t: 21 * KT / WIND_MAX_MS, rgb: [235,  79,  45] },  // 21 kt
+  { t: 23 * KT / WIND_MAX_MS, rgb: [116,  20,  11] },  // 23 kt
+  { t: 24 * KT / WIND_MAX_MS, rgb: [116,  20,  11] },  // 24 kt
+  { t: 26 * KT / WIND_MAX_MS, rgb: [134,  25,  25] },  // 26 kt
+  { t: 28 * KT / WIND_MAX_MS, rgb: [166,  33,  61] },  // 28 kt
+  { t: 30 * KT / WIND_MAX_MS, rgb: [188,  39,  96] },  // 30 kt
+  { t: 31 * KT / WIND_MAX_MS, rgb: [188,  39,  96] },  // 31 kt
+  { t: 33 * KT / WIND_MAX_MS, rgb: [206,  44, 130] },  // 33 kt
+  { t: 35 * KT / WIND_MAX_MS, rgb: [206,  44, 168] },  // 35 kt
 ];
 // Precipitation: white → green → yellow → orange → red → magenta
 const PRECIP_STOPS: Array<[number, number, number]> = [
