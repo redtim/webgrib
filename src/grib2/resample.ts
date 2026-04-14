@@ -215,3 +215,71 @@ export function resampleLccToLatLon(
     bounds,
   };
 }
+
+/**
+ * Sample HRRR LCC wind at regular lat/lon grid points with caller-supplied bounds.
+ * Returns true-north u/v components on the target grid.
+ * Used to resample HRRR onto an OFS grid for layer combination.
+ */
+export function sampleHrrrAtLatLon(
+  u: DecodedField,
+  v: DecodedField,
+  grid: LambertConformalGrid,
+  targetNx: number,
+  targetNy: number,
+  bounds: { lonMin: number; lonMax: number; latMin: number; latMax: number },
+): { u: Float32Array; v: Float32Array } {
+  const srcNx = u.nx;
+  const lcc = computeLccUniforms(grid);
+  const srcU = u.values;
+  const srcV = v.values;
+  const n = lcc.n;
+  const lambda0 = lcc.lambda0;
+
+  const dx = (bounds.lonMax - bounds.lonMin) / (targetNx - 1);
+  const dy = (bounds.latMax - bounds.latMin) / (targetNy - 1);
+
+  const uOut = new Float32Array(targetNx * targetNy);
+  const vOut = new Float32Array(targetNx * targetNy);
+
+  for (let j = 0; j < targetNy; j++) {
+    // Row 0 = south (matching OFS scan order)
+    const lat = bounds.latMin + j * dy;
+    for (let i = 0; i < targetNx; i++) {
+      const lon = bounds.lonMin + i * dx;
+      const idx = j * targetNx + i;
+
+      const { u: gu, v: gv } = lonLatToGridUV(lcc, lon, lat);
+      if (gu < 0 || gu > 1 || gv < 0 || gv > 1) {
+        uOut[idx] = NaN;
+        vOut[idx] = NaN;
+        continue;
+      }
+
+      const fx = gu * (srcNx - 1);
+      const fy = gv * (u.ny - 1);
+      const i0 = Math.floor(fx);
+      const j0 = Math.floor(fy);
+      const i1 = Math.min(srcNx - 1, i0 + 1);
+      const j1 = Math.min(u.ny - 1, j0 + 1);
+      const tx = fx - i0;
+      const ty = fy - j0;
+
+      const row0 = j0 * srcNx;
+      const row1 = j1 * srcNx;
+      const uGrid = (srcU[row0 + i0]! * (1 - tx) + srcU[row0 + i1]! * tx) * (1 - ty)
+                   + (srcU[row1 + i0]! * (1 - tx) + srcU[row1 + i1]! * tx) * ty;
+      const vGrid = (srcV[row0 + i0]! * (1 - tx) + srcV[row0 + i1]! * tx) * (1 - ty)
+                   + (srcV[row1 + i0]! * (1 - tx) + srcV[row1 + i1]! * tx) * ty;
+
+      // Rotate grid-relative → true-north
+      const gamma = n * wrapPi(lon * DEG - lambda0);
+      const cosG = Math.cos(gamma);
+      const sinG = Math.sin(gamma);
+      uOut[idx] = uGrid * cosG + vGrid * sinG;
+      vOut[idx] = -uGrid * sinG + vGrid * cosG;
+    }
+  }
+
+  return { u: uOut, v: vOut };
+}

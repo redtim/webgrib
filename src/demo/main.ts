@@ -15,6 +15,7 @@ import { DecodeClient } from '../worker/client.js';
 import { CATALOG, findVariable, displayRange, displayUnit } from '../renderer/catalog.js';
 import type { CatalogVariable, VariableLevel } from '../renderer/catalog.js';
 import { fetchSfbofsSurface, latestCycle as sfbofsLatestCycle } from '../ofs/sfbofs.js';
+import { sampleHrrrAtLatLon } from '../grib2/resample.js';
 import {
   UNIT_OPTIONS, getUnitPref, setUnitPref, onUnitChange,
   convertSpeed, unitLabel,
@@ -105,7 +106,8 @@ async function main(): Promise<void> {
   const client = new DecodeClient();
 
   let currentVariable: CatalogVariable | null = null;
-  let loading = false;
+  let loadGen = 0;
+  let lastFitVariable: string | null = null; // track which variable we last zoomed to
   let tideManager: TideStationManager | null = null;
 
   // ---- UI components --------------------------------------------------------
@@ -120,7 +122,7 @@ async function main(): Promise<void> {
     parent: timelineBar,
     onChange: (_cycle, _fhour) => {
       tideManager?.setForecastTime(timeline.validDate());
-      if (currentVariable && !loading) {
+      if (currentVariable) {
         void loadLevel(currentVariable, levelSlider.index, _cycle, _fhour);
       }
     },
@@ -129,7 +131,7 @@ async function main(): Promise<void> {
   const levelSlider = new LevelSlider({
     parent: layersWrap,
     onChange: (levelIndex) => {
-      if (currentVariable && !loading) {
+      if (currentVariable) {
         void loadLevel(currentVariable, levelIndex, timeline.cycle, timeline.fhour);
       }
     },
@@ -299,22 +301,25 @@ async function main(): Promise<void> {
     cycle: string,
     fhour: number,
   ): Promise<void> {
-    if (loading) return;
-    loading = true;
+    // Each load gets a unique generation id — if a newer load starts while
+    // this one is in flight, we skip rendering the stale result but let the
+    // fetch complete in the background so it populates caches.
+    const gen = ++loadGen;
+    const isStale = () => gen !== loadGen;
+
     currentVariable = variable;
     panel.setActive(variable.id);
 
     const level = variable.levels[levelIndex];
-    if (!level) { loading = false; return; }
+    if (!level) return;
 
     // Route OFS variables to the OFS loader
     if (variable.source === 'ofs') {
       try {
-        await loadOfsLevel(variable);
+        await loadOfsLevel(variable, isStale);
       } catch (err) {
+        if (isStale()) return;
         setStatus(err instanceof Error ? err.message : String(err), true);
-      } finally {
-        loading = false;
       }
       return;
     }
@@ -335,7 +340,6 @@ async function main(): Promise<void> {
           windLayer.setVisible(false);
           legend.hide();
           setStatus(`${displayName} — no data at analysis hour`);
-          loading = false;
           return;
         }
         const { field, grid } = await client.decode(urls.idx, {
@@ -343,6 +347,7 @@ async function main(): Promise<void> {
           level: level.query.level,
           forecast: layerFcRe,
         });
+        if (isStale()) return;
         if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
         scalarLayer.setVisible(true);
         scalarLayer.setData({ ...field, missingValue: NaN }, grid);
@@ -361,6 +366,7 @@ async function main(): Promise<void> {
           { parameter: level.queryU.parameter, level: level.queryU.level, forecast: fcRe },
           { parameter: level.queryV.parameter, level: level.queryV.level, forecast: fcRe },
         );
+        if (isStale()) return;
 
         // Compute wind speed magnitude for the scalar raster underneath particles
         const speed = new Float32Array(u.values.length);
@@ -389,15 +395,18 @@ async function main(): Promise<void> {
         setStatus(`${displayName} loaded (${u.nx}\u00D7${u.ny})`);
       }
     } catch (err) {
+      if (isStale()) return;
       setStatus(err instanceof Error ? err.message : String(err), true);
-    } finally {
-      loading = false;
     }
   }
 
   // ---- load OFS variable -----------------------------------------------------
 
-  async function loadOfsLevel(variable: CatalogVariable): Promise<void> {
+  async function loadOfsLevel(variable: CatalogVariable, isStale: () => boolean): Promise<void> {
+    if (variable.ofsModel === 'apparent-wind') {
+      await loadApparentWind(variable, isStale);
+      return;
+    }
     if (variable.ofsModel !== 'sfbofs') {
       setStatus(`Unknown OFS model: ${variable.ofsModel}`, true);
       return;
@@ -405,10 +414,10 @@ async function main(): Promise<void> {
     const displayName = variable.label;
     setStatus(`fetching ${displayName}...`);
 
-    // Map the timeline's valid time to the best SFBOFS cycle + forecast hour.
-    // SFBOFS cycles: 03z, 09z, 15z, 21z — available ~5 hours after nominal time.
+    // Use wall clock time to find the latest *available* OFS cycle, then
+    // compute the forecast hour offset to reach the desired valid time.
     const validDate = timeline.validDate();
-    const { cycle, date } = sfbofsLatestCycle(validDate);
+    const { cycle, date } = sfbofsLatestCycle(); // wall clock — what's actually available
     const cycleMs = Date.UTC(
       parseInt(date.slice(0, 4)), parseInt(date.slice(4, 6)) - 1,
       parseInt(date.slice(6, 8)), cycle,
@@ -416,6 +425,7 @@ async function main(): Promise<void> {
     const fhour = Math.max(1, Math.min(48, Math.round((validDate.getTime() - cycleMs) / 3600000)));
 
     const field = await fetchSfbofsSurface(cycle, date, fhour);
+    if (isStale()) return;
 
     // Compute speed magnitude for the scalar raster
     const speed = new Float32Array(field.u.length);
@@ -445,13 +455,111 @@ async function main(): Promise<void> {
       legend.update(variable.colormap, range[0], range[1], variable.unit ?? '');
     }
 
-    // Zoom to the SF Bay area
-    map.fitBounds(
-      [[field.bounds.lonMin, field.bounds.latMin], [field.bounds.lonMax, field.bounds.latMax]],
-      { padding: 20, maxZoom: 10 },
-    );
+    // Zoom to the SF Bay area only on first selection of this variable
+    if (lastFitVariable !== variable.id) {
+      lastFitVariable = variable.id;
+      map.fitBounds(
+        [[field.bounds.lonMin, field.bounds.latMin], [field.bounds.lonMax, field.bounds.latMax]],
+        { padding: 20, maxZoom: 16 },
+      );
+    }
 
     setStatus(`${displayName} loaded (${field.nx}\u00D7${field.ny}, cycle ${date} t${String(cycle).padStart(2, '0')}z f${String(fhour).padStart(3, '0')})`);
+  }
+
+  // ---- apparent wind (HRRR 10m wind − OFS current) --------------------------
+
+  async function loadApparentWind(variable: CatalogVariable, isStale: () => boolean): Promise<void> {
+    const displayName = variable.label;
+    setStatus(`fetching ${displayName}...`);
+
+    // Use wall clock for latest available OFS cycle, then offset to valid time
+    const validDate = timeline.validDate();
+    const { cycle: ofsCycle, date: ofsDate } = sfbofsLatestCycle();
+    const ofsCycleMs = Date.UTC(
+      parseInt(ofsDate.slice(0, 4)), parseInt(ofsDate.slice(4, 6)) - 1,
+      parseInt(ofsDate.slice(6, 8)), ofsCycle,
+    );
+    const ofsFhour = Math.max(1, Math.min(48, Math.round((validDate.getTime() - ofsCycleMs) / 3600000)));
+
+    // HRRR cycle/fhour from timeline
+    const hrrrUrlSet = hrrrUrls(timeline.cycle, timeline.fhour);
+    const fcRe = forecastQuery(timeline.fhour);
+
+    // Fetch both in parallel
+    const [ofsField, hrrrWind] = await Promise.all([
+      fetchSfbofsSurface(ofsCycle, ofsDate, ofsFhour),
+      client.decodePair(
+        hrrrUrlSet.idx,
+        { parameter: /^UGRD$/, level: /^10 m above ground$/, forecast: fcRe },
+        { parameter: /^VGRD$/, level: /^10 m above ground$/, forecast: fcRe },
+      ),
+    ]);
+    if (isStale()) return;
+
+    // Resample HRRR wind onto the OFS grid (true-north frame)
+    const hrrrOnOfs = sampleHrrrAtLatLon(
+      { ...hrrrWind.u, missingValue: NaN },
+      { ...hrrrWind.v, missingValue: NaN },
+      hrrrWind.grid,
+      ofsField.nx, ofsField.ny,
+      ofsField.bounds,
+    );
+
+    // Vector subtraction: apparent = wind − current
+    // A boat moving with the current at velocity C feels wind W − C
+    const apparentU = new Float32Array(ofsField.u.length);
+    const apparentV = new Float32Array(ofsField.v.length);
+    const speed = new Float32Array(ofsField.u.length);
+    let sMin = Infinity, sMax = -Infinity;
+
+    for (let i = 0; i < apparentU.length; i++) {
+      const wu = hrrrOnOfs.u[i]!;
+      const wv = hrrrOnOfs.v[i]!;
+      // Treat missing current as zero (no current effect)
+      const cu = Number.isFinite(ofsField.u[i]!) ? ofsField.u[i]! : 0;
+      const cv = Number.isFinite(ofsField.v[i]!) ? ofsField.v[i]! : 0;
+
+      if (!Number.isFinite(wu)) {
+        apparentU[i] = NaN;
+        apparentV[i] = NaN;
+        speed[i] = NaN;
+        continue;
+      }
+
+      apparentU[i] = wu - cu;
+      apparentV[i] = wv - cv;
+      const s = Math.hypot(apparentU[i]!, apparentV[i]!);
+      speed[i] = s;
+      if (s < sMin) sMin = s;
+      if (s > sMax) sMax = s;
+    }
+
+    const speedField = { values: speed, nx: ofsField.nx, ny: ofsField.ny, min: sMin, max: sMax, missingValue: NaN };
+
+    // Show scalar raster (apparent wind speed)
+    if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+    scalarLayer.setVisible(true);
+    if (variable.colormap) scalarLayer.setColormap(variable.colormap);
+    scalarLayer.setDataLatLon(speedField, ofsField.bounds);
+    if (variable.range) scalarLayer.setValueRange(variable.range);
+
+    // Show apparent wind particles
+    if (!windLayer.isAttached()) windLayer.attach(map);
+    windLayer.setVisible(true);
+    windLayer.setWindLatLon(apparentU, apparentV, ofsField.nx, ofsField.ny, ofsField.bounds);
+
+    legend.update('wind', ...windLegendArgs());
+
+    if (lastFitVariable !== variable.id) {
+      lastFitVariable = variable.id;
+      map.fitBounds(
+        [[ofsField.bounds.lonMin, ofsField.bounds.latMin], [ofsField.bounds.lonMax, ofsField.bounds.latMax]],
+        { padding: 20, maxZoom: 16 },
+      );
+    }
+
+    setStatus(`${displayName} loaded (HRRR t${timeline.cycle.slice(8)}z f${String(timeline.fhour).padStart(2, '0')} + SFBOFS t${String(ofsCycle).padStart(2, '0')}z f${String(ofsFhour).padStart(3, '0')})`);
   }
 
   // ---- keyboard shortcuts ---------------------------------------------------

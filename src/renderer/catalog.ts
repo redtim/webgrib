@@ -308,6 +308,13 @@ export const CATALOG: CatalogVariable[] = [
     format: (v: number) => `${v.toFixed(2)} m/s`,
     levels: [{ label: 'Surface' }],
   },
+  {
+    id: 'apparent-wind', group: 'Ocean', label: 'Apparent Wind', kind: 'wind',
+    source: 'ofs', ofsModel: 'apparent-wind',
+    colormap: 'wind', range: [0, 104], dimension: 'speed',
+    format: fmtSpeed,
+    levels: [{ label: 'Surface' }],
+  },
 ];
 
 /** All groups in display order. */
