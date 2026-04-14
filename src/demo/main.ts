@@ -14,7 +14,7 @@ import { hrrrUrls, forecastQuery } from '../grib2/idx.js';
 import { DecodeClient } from '../worker/client.js';
 import { CATALOG, findVariable, displayRange, displayUnit } from '../renderer/catalog.js';
 import type { CatalogVariable, VariableLevel } from '../renderer/catalog.js';
-import { fetchSfbofsSurface, latestCycle as sfbofsLatestCycle } from '../ofs/sfbofs.js';
+import { fetchSfbofsSurface, latestCycle as sfbofsLatestCycle, SFBOFS_MAX_FHOUR } from '../ofs/sfbofs.js';
 import { sampleHrrrAtLatLon } from '../grib2/resample.js';
 import {
   UNIT_OPTIONS, getUnitPref, setUnitPref, onUnitChange,
@@ -29,8 +29,18 @@ import { LevelSlider } from './levelSlider.js';
 import { TideStationManager } from './tides.js';
 
 // Wind speed raster range in m/s — must match WIND_MAX_MS in colormaps.ts.
-const KT_TO_MS = 0.514444;
-const WIND_MAX = 35 * KT_TO_MS; // 18 m/s = 35 kt
+const WIND_MAX = 35 * 0.514444; // 18 m/s = 35 kt
+
+/** Compute the best available SFBOFS cycle and forecast hour for a given valid time. */
+function ofsSchedule(validDate: Date): { cycle: number; date: string; fhour: number } {
+  const { cycle, date } = sfbofsLatestCycle();
+  const cycleMs = Date.UTC(
+    parseInt(date.slice(0, 4)), parseInt(date.slice(4, 6)) - 1,
+    parseInt(date.slice(6, 8)), cycle,
+  );
+  const fhour = Math.max(1, Math.min(SFBOFS_MAX_FHOUR, Math.round((validDate.getTime() - cycleMs) / 3600000)));
+  return { cycle, date, fhour };
+}
 
 // Wind tick marks in m/s (native unit) — converted to display unit dynamically
 const WIND_TICK_MS = [0, 2.57, 5.14, 7.72, 10.29, 12.86, 15.43, 18.01]; // ~0,5,10,15,20,25,30,35 kt
@@ -414,15 +424,7 @@ async function main(): Promise<void> {
     const displayName = variable.label;
     setStatus(`fetching ${displayName}...`);
 
-    // Use wall clock time to find the latest *available* OFS cycle, then
-    // compute the forecast hour offset to reach the desired valid time.
-    const validDate = timeline.validDate();
-    const { cycle, date } = sfbofsLatestCycle(); // wall clock — what's actually available
-    const cycleMs = Date.UTC(
-      parseInt(date.slice(0, 4)), parseInt(date.slice(4, 6)) - 1,
-      parseInt(date.slice(6, 8)), cycle,
-    );
-    const fhour = Math.max(1, Math.min(48, Math.round((validDate.getTime() - cycleMs) / 3600000)));
+    const { cycle, date, fhour } = ofsSchedule(timeline.validDate());
 
     const field = await fetchSfbofsSurface(cycle, date, fhour);
     if (isStale()) return;
@@ -473,14 +475,7 @@ async function main(): Promise<void> {
     const displayName = variable.label;
     setStatus(`fetching ${displayName}...`);
 
-    // Use wall clock for latest available OFS cycle, then offset to valid time
-    const validDate = timeline.validDate();
-    const { cycle: ofsCycle, date: ofsDate } = sfbofsLatestCycle();
-    const ofsCycleMs = Date.UTC(
-      parseInt(ofsDate.slice(0, 4)), parseInt(ofsDate.slice(4, 6)) - 1,
-      parseInt(ofsDate.slice(6, 8)), ofsCycle,
-    );
-    const ofsFhour = Math.max(1, Math.min(48, Math.round((validDate.getTime() - ofsCycleMs) / 3600000)));
+    const { cycle: ofsCycle, date: ofsDate, fhour: ofsFhour } = ofsSchedule(timeline.validDate());
 
     // HRRR cycle/fhour from timeline
     const hrrrUrlSet = hrrrUrls(timeline.cycle, timeline.fhour);
@@ -679,7 +674,7 @@ function escapeHtml(s: string): string {
 
 function compassFromBearing(deg: number): string {
   const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
-  return dirs[Math.round(((deg % 360) / 22.5)) % 16]!;
+  return dirs[Math.round((((deg % 360) + 360) % 360) / 22.5) % 16]!;
 }
 
 void main();

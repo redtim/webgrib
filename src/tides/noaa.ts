@@ -5,11 +5,15 @@
  * offsets from the NOAA Metadata API, with in-memory caching.
  */
 
+import {
+  constituentSpeed,
+  predictTideSeries, predictSubordinateSeries,
+  predictCurrentSeries, predictSubordinateCurrentSeries,
+} from './predict.js';
 import type {
   StationHarmonic, StationDatum, SubordinateOffsets,
   CurrentHarmonic, SubordinateCurrentOffsets,
 } from './predict.js';
-import { constituentSpeed } from './predict.js';
 
 const META_BASE = 'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi';
 
@@ -78,12 +82,13 @@ function hasCacheConsent(): boolean {
   return localStorage.getItem(LS_CONSENT_KEY) === 'yes';
 }
 
+let cachePromptShown = false;
+
 /** Prompt the user to accept local caching. Called once per page load if not accepted. */
 export function promptCacheConsent(): void {
   if (hasCacheConsent()) return;
-  // Don't prompt again if already dismissed this session
-  if ((promptCacheConsent as { _prompted?: boolean })._prompted) return;
-  (promptCacheConsent as { _prompted?: boolean })._prompted = true;
+  if (cachePromptShown) return;
+  cachePromptShown = true;
 
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);';
@@ -116,67 +121,79 @@ export function promptCacheConsent(): void {
   });
 }
 
-/** Save all in-memory caches to localStorage. */
+/** Save all in-memory caches to localStorage. Evicts oldest entries if over 4MB. */
 function persistAllCaches(): void {
   if (!hasCacheConsent()) return;
   try {
     const store: Record<string, unknown> = {};
-    // Tide harmonics
     const tideH: Record<string, StationHarmonic[]> = {};
     for (const [k, v] of harmonicCache) { if (v.length > 0) tideH[k] = v; }
     store['tideHarmonics'] = tideH;
-    // Datums
     const datums: Record<string, StationDatum> = {};
     for (const [k, v] of datumCache) datums[k] = v;
     store['datums'] = datums;
-    // Tide offsets
     const tideOff: Record<string, SubordinateOffsets> = {};
     for (const [k, v] of offsetCache) tideOff[k] = v;
     store['tideOffsets'] = tideOff;
-    // Current harmonics
     const curH: Record<string, CurrentHarmonic[]> = {};
     for (const [k, v] of currentHarmonicCache) { if (v.length > 0) curH[k] = v; }
     store['currentHarmonics'] = curH;
-    // Current offsets
     const curOff: Record<string, SubordinateCurrentOffsets> = {};
     for (const [k, v] of currentOffsetCache) curOff[k] = v;
     store['currentOffsets'] = curOff;
-    // Current azimuths
     const curAzi: Record<string, { floodDir: number; ebbDir: number }> = {};
     for (const [k, v] of currentAziCache) curAzi[k] = v;
     store['currentAzimuths'] = curAzi;
 
-    localStorage.setItem(LS_STORE_KEY, JSON.stringify(store));
-  } catch { /* localStorage full or unavailable — silently skip */ }
+    const json = JSON.stringify(store);
+    // Stay under 4MB to leave headroom in the 5MB localStorage quota
+    if (json.length > 4 * 1024 * 1024) {
+      console.warn(`Harmonic cache too large (${(json.length / 1024 / 1024).toFixed(1)}MB), skipping persist`);
+      return;
+    }
+    localStorage.setItem(LS_STORE_KEY, json);
+  } catch (err) {
+    console.warn('Failed to persist harmonic cache:', err);
+  }
 }
 
-/** Hydrate in-memory caches from localStorage on startup. */
+/** Hydrate in-memory caches from localStorage on startup. Validates shape. */
 function hydrateFromLocalStorage(): void {
   if (!hasCacheConsent()) return;
   try {
     const raw = localStorage.getItem(LS_STORE_KEY);
     if (!raw) return;
     const store = JSON.parse(raw);
+    if (typeof store !== 'object' || store === null) return;
 
     for (const [k, v] of Object.entries(store.tideHarmonics ?? {})) {
-      harmonicCache.set(k, v as StationHarmonic[]);
+      if (Array.isArray(v) && v.length > 0 && typeof v[0].name === 'string')
+        harmonicCache.set(k, v as StationHarmonic[]);
     }
     for (const [k, v] of Object.entries(store.datums ?? {})) {
-      datumCache.set(k, v as StationDatum);
+      if (v && typeof (v as StationDatum).msl === 'number')
+        datumCache.set(k, v as StationDatum);
     }
     for (const [k, v] of Object.entries(store.tideOffsets ?? {})) {
-      offsetCache.set(k, v as SubordinateOffsets);
+      if (v && typeof (v as SubordinateOffsets).refStationId === 'string')
+        offsetCache.set(k, v as SubordinateOffsets);
     }
     for (const [k, v] of Object.entries(store.currentHarmonics ?? {})) {
-      currentHarmonicCache.set(k, v as CurrentHarmonic[]);
+      if (Array.isArray(v) && v.length > 0 && typeof v[0].name === 'string')
+        currentHarmonicCache.set(k, v as CurrentHarmonic[]);
     }
     for (const [k, v] of Object.entries(store.currentOffsets ?? {})) {
-      currentOffsetCache.set(k, v as SubordinateCurrentOffsets);
+      if (v && typeof (v as SubordinateCurrentOffsets).refStationId === 'string')
+        currentOffsetCache.set(k, v as SubordinateCurrentOffsets);
     }
     for (const [k, v] of Object.entries(store.currentAzimuths ?? {})) {
-      currentAziCache.set(k, v as { floodDir: number; ebbDir: number });
+      if (v && typeof (v as { floodDir: number }).floodDir === 'number')
+        currentAziCache.set(k, v as { floodDir: number; ebbDir: number });
     }
-  } catch { /* corrupt data — ignore */ }
+  } catch {
+    // Corrupt data — clear it so we don't keep failing
+    try { localStorage.removeItem(LS_STORE_KEY); } catch { /* */ }
+  }
 }
 
 // Debounce persistence — write at most every 5 seconds
@@ -303,7 +320,7 @@ export async function generatePrediction(
   end: Date,
   stepMin = 6,
 ): Promise<Array<{ t: number; v: number }>> {
-  const { predictTideSeries, predictSubordinateSeries } = await import('./predict.js');
+  // predictTideSeries, predictSubordinateSeries imported statically at top
 
   if (stationType === 'R') {
     const [harmonics, datum] = await Promise.all([
@@ -427,23 +444,16 @@ export async function generateCurrentPrediction(
   end: Date,
   stepMin = 6,
 ): Promise<{ series: Array<{ t: number; v: number }>; floodDir: number; ebbDir: number }> {
-  const { predictCurrentSeries, predictSubordinateCurrentSeries } = await import('./predict.js');
+  // predictCurrentSeries, predictSubordinateCurrentSeries imported statically at top
 
   if (stationType === 'H') {
-    // Harmonic station — compute directly
     const harmonics = await fetchCurrentHarmonics(stationId);
     if (harmonics.length === 0) throw new Error('No harmonic data available');
 
     const series = predictCurrentSeries(start, end, stepMin, harmonics);
+    const azi = getCurrentAzimuth(stationId) ?? { floodDir: 0, ebbDir: 180 };
 
-    // Get direction from first constituent's azimuth
-    const url = `${META_BASE}/stations/${stationId}/harcon.json`;
-    const resp = await fetch(url);
-    const data: HarconResponse = await resp.json();
-    const first = data.HarmonicConstituents?.[0];
-    const azi = first?.azi ?? 0;
-
-    return { series, floodDir: azi, ebbDir: (azi + 180) % 360 };
+    return { series, floodDir: azi.floodDir, ebbDir: azi.ebbDir };
   } else if (stationType === 'S') {
     // Subordinate station — get offsets, then compute from reference
     const offsets = await fetchCurrentSubordinateOffsets(stationId);

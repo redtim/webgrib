@@ -304,8 +304,8 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'sfbofs-currents', group: 'Ocean', label: 'SF Bay Currents', kind: 'wind',
     source: 'ofs', ofsModel: 'sfbofs',
-    colormap: 'ocean-currents', range: [0, 3], unit: 'm/s',
-    format: (v: number) => `${v.toFixed(2)} m/s`,
+    colormap: 'ocean-currents', range: [0, 3], dimension: 'speed',
+    format: fmtSpeed,
     levels: [{ label: 'Surface' }],
   },
   {

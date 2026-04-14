@@ -67,6 +67,12 @@ export class DecodeClient {
   constructor() {
     this.worker = new Worker(new URL('./decodeWorker.ts', import.meta.url), { type: 'module' });
     this.worker.addEventListener('message', (ev) => this.onMessage(ev));
+    this.worker.addEventListener('error', (ev) => {
+      // Worker crashed — reject all pending promises so the UI doesn't freeze
+      const err = new Error(`Decode worker error: ${ev.message ?? 'unknown'}`);
+      for (const p of this.pending.values()) p.reject(err);
+      this.pending.clear();
+    });
   }
 
   async decode(idxUrl: string, query: IdxQuery): Promise<{ field: DecodedFieldLite; grid: LambertConformalGrid }> {

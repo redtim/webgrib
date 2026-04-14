@@ -109,9 +109,9 @@ export class TideStationManager {
     this.map = map;
     map.on('moveend', () => {
       void this.fetchVisibleHarmonics();
-      this.declutterMarkers();
+      this.updateAllPredictions(); // rebuild markers for new viewport
     });
-    map.on('zoom', () => { this.declutterMarkers(); });
+    map.on('zoom', () => { this.scheduleDeclutter(); });
   }
 
   /** Set the popup callback used by DOM marker clicks. Call after attach. */
@@ -212,8 +212,6 @@ export class TideStationManager {
   // ---------------------------------------------------------- MapLibre layers
 
   private sourceId(type: TideLayerType): string { return `noaa-${type}`; }
-  private clusterLayerId(type: TideLayerType): string { return `noaa-${type}-clusters`; }
-  private clusterCountLayerId(type: TideLayerType): string { return `noaa-${type}-cluster-count`; }
   private pointLayerId(type: TideLayerType): string { return `noaa-${type}-points`; }
 
   private addMapLayers(type: TideLayerType): void {
@@ -249,25 +247,7 @@ export class TideStationManager {
   }
 
   /** Create the current arrow SDF icon if not already added to the map. */
-  private ensureArrowIcon(map: MlMap): void {
-    if (map.hasImage('current-arrow')) return;
-    const size = 24;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d')!;
-    // Simple upward-pointing triangle arrow
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.moveTo(size / 2, 2);
-    ctx.lineTo(size - 4, size - 4);
-    ctx.lineTo(size / 2, size - 8);
-    ctx.lineTo(4, size - 4);
-    ctx.closePath();
-    ctx.fill();
-    const imgData = ctx.getImageData(0, 0, size, size);
-    map.addImage('current-arrow', { width: size, height: size, data: new Uint8Array(imgData.data.buffer) }, { sdf: true });
-  }
+
 
 
 
@@ -275,8 +255,7 @@ export class TideStationManager {
     const map = this.map!;
     const sid = this.sourceId(type);
     const ids = [
-      this.clusterLayerId(type), this.clusterCountLayerId(type),
-      this.pointLayerId(type), `${sid}-labels`, `${sid}-arrows`,
+      this.pointLayerId(type), `${sid}-labels`,
     ];
     for (const id of ids) {
       if (map.getLayer(id)) map.removeLayer(id);
@@ -373,7 +352,7 @@ export class TideStationManager {
       this.fetching.add(key);
       try {
         // Fetch observed and predicted in parallel
-        const base = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter';
+        const base = DATA_BASE;
         const common = `station=${id}&datum=MLLW&time_zone=gmt&units=english&format=json&date=latest`;
         const [obsResp, predResp] = await Promise.all([
           fetch(`${base}?${common}&product=water_level`),
@@ -522,11 +501,16 @@ export class TideStationManager {
     }
   }
 
-  /** Create or update DOM markers with rich HTML labels. */
+  /** Create or update DOM markers only for stations visible in the viewport. */
   private updateDomMarkers(type: TideLayerType, fc: GeoJSON.FeatureCollection): void {
     const map = this.map;
     if (!map) return;
     const cfg = LAYER_CONFIGS[type];
+    const bounds = map.getBounds();
+    const prefix = `${type}:`;
+
+    // Track which markers are still relevant this update
+    const activeKeys = new Set<string>();
 
     for (const feat of fc.features) {
       const props = feat.properties as Record<string, unknown>;
@@ -534,32 +518,15 @@ export class TideStationManager {
 
       const id = props['id'] as string;
       const coords = (feat.geometry as GeoJSON.Point).coordinates;
-      const key = `${type}:${id}`;
 
-      let html: string;
-      let markerClass = 'station-marker';
-      if (type === 'waterlevels') {
-        const observed = props['wlObserved'] as number;
-        const anomaly = props['wlAnomaly'] as number;
-        const anomalyColor = anomaly >= 0 ? '#7ee787' : '#ff7b72';
-        const anomalySign = anomaly >= 0 ? '+' : '';
-        html = `<span class="station-badge" style="color:${cfg.color}">W</span>`
-          + `<span class="station-val">${observed.toFixed(1)}</span>`
-          + `<span class="station-anom" style="color:${anomalyColor}">${anomalySign}${anomaly.toFixed(1)}</span>`;
-      } else if (type === 'currentpredictions') {
-        const speed = props['currentSpeed'] as number;
-        const dir = props['currentDir'] as number;
-        const speedColor = speed < 0.3 ? '#8b949e' : speed < 1 ? '#79c0ff' : speed < 2 ? '#7ee787' : speed < 3 ? '#f0c040' : '#ff7b72';
-        html = `<span class="station-badge" style="color:${cfg.color}">C</span>`
-          + `<span class="station-arrow" style="color:${speedColor};transform:rotate(${dir}deg)">&#x2191;</span>`
-          + `<span class="station-val" style="color:${speedColor}">${speed.toFixed(1)}</span>`;
-        markerClass = 'station-marker station-marker-current';
-      } else {
-        const height = props['tideHeight'] as number;
-        const valColor = height >= 0 ? '#7ee787' : '#ff7b72';
-        html = `<span class="station-badge" style="color:${cfg.color}">T</span>`
-          + `<span class="station-val" style="color:${valColor}">${height.toFixed(1)}</span>`;
-      }
+      // Only create markers for stations in the viewport
+      if (!bounds.contains([coords[0]!, coords[1]!] as [number, number])) continue;
+
+      const key = `${prefix}${id}`;
+      activeKeys.add(key);
+
+      const html = this.buildMarkerHtml(type, props, cfg.color);
+      const markerClass = type === 'currentpredictions' ? 'station-marker station-marker-current' : 'station-marker';
 
       const existing = this.domMarkers.get(key);
       if (existing) {
@@ -579,40 +546,69 @@ export class TideStationManager {
       }
     }
 
-    this.declutterMarkers();
+    // Remove markers that went out of viewport
+    for (const [key, marker] of this.domMarkers) {
+      if (key.startsWith(prefix) && !activeKeys.has(key)) {
+        marker.remove();
+        this.domMarkers.delete(key);
+      }
+    }
+
+    this.scheduleDeclutter();
+  }
+
+  private buildMarkerHtml(type: TideLayerType, props: Record<string, unknown>, color: string): string {
+    if (type === 'waterlevels') {
+      const observed = props['wlObserved'] as number;
+      const anomaly = props['wlAnomaly'] as number;
+      const anomalyColor = anomaly >= 0 ? '#7ee787' : '#ff7b72';
+      const anomalySign = anomaly >= 0 ? '+' : '';
+      return `<span class="station-badge" style="color:${color}">W</span>`
+        + `<span class="station-val">${observed.toFixed(1)}</span>`
+        + `<span class="station-anom" style="color:${anomalyColor}">${anomalySign}${anomaly.toFixed(1)}</span>`;
+    } else if (type === 'currentpredictions') {
+      const speed = props['currentSpeed'] as number;
+      const dir = props['currentDir'] as number;
+      const speedColor = speed < 0.3 ? '#8b949e' : speed < 1 ? '#79c0ff' : speed < 2 ? '#7ee787' : speed < 3 ? '#f0c040' : '#ff7b72';
+      return `<span class="station-badge" style="color:${color}">C</span>`
+        + `<span class="station-arrow" style="color:${speedColor};transform:rotate(${dir}deg)">&#x2191;</span>`
+        + `<span class="station-val" style="color:${speedColor}">${speed.toFixed(1)}</span>`;
+    } else {
+      const height = props['tideHeight'] as number;
+      const valColor = height >= 0 ? '#7ee787' : '#ff7b72';
+      return `<span class="station-badge" style="color:${color}">T</span>`
+        + `<span class="station-val" style="color:${valColor}">${height.toFixed(1)}</span>`;
+    }
+  }
+
+  /** Throttled declutter — avoids running collision detection on every frame during zoom. */
+  private declutterTimer: ReturnType<typeof setTimeout> | null = null;
+  private scheduleDeclutter(): void {
+    if (this.declutterTimer) return;
+    this.declutterTimer = setTimeout(() => {
+      this.declutterTimer = null;
+      this.declutterMarkers();
+    }, 50);
   }
 
   /**
-   * Hide DOM markers that overlap with each other. Projects each marker
-   * to screen coordinates and uses a simple greedy collision pass —
-   * first marker in wins, any that overlap it are hidden.
+   * Hide DOM markers that overlap. Only considers markers currently in the DOM
+   * (viewport-filtered by updateDomMarkers).
    */
   private declutterMarkers(): void {
     const map = this.map;
     if (!map) return;
 
-    // Collect all markers with their screen positions
-    const items: Array<{ key: string; marker: maplibregl.Marker; x: number; y: number; w: number; h: number }> = [];
-    const bounds = map.getBounds();
+    const items: Array<{ marker: maplibregl.Marker; x: number; y: number; w: number; h: number }> = [];
 
     for (const [key, marker] of this.domMarkers) {
-      const lngLat = marker.getLngLat();
-      // Skip markers outside viewport
-      if (!bounds.contains(lngLat)) {
-        marker.getElement().style.display = 'none';
-        continue;
-      }
-      const pt = map.project(lngLat);
-      // Estimate width based on type (waterlevels has anomaly text, wider)
+      const pt = map.project(marker.getLngLat());
       const isWl = key.startsWith('waterlevels:');
-      const w = isWl ? 95 : 50;
-      const h = 20;
-      items.push({ key, marker, x: pt.x, y: pt.y, w, h });
+      items.push({ marker, x: pt.x, y: pt.y, w: isWl ? 95 : 50, h: 20 });
     }
 
-    // Greedy collision detection — earlier items win
     const occupied: Array<{ x: number; y: number; w: number; h: number }> = [];
-    const PAD = 4; // pixels of padding between markers
+    const PAD = 4;
 
     for (const item of items) {
       const ax = item.x;
@@ -898,10 +894,9 @@ export class TideStationManager {
     color: string,
     nowMs: number,
   ): void {
-    const mapped = series.map((p) => ({ t: p.t, v: p.v }));
-    const currentLevel = interpolateAtTime(mapped, nowMs);
-    const nextHigh = findNextExtreme(mapped, nowMs, 'high');
-    const nextLow = findNextExtreme(mapped, nowMs, 'low');
+    const currentLevel = interpolateAtTime(series, nowMs);
+    const nextHigh = findNextExtreme(series, nowMs, 'high');
+    const nextLow = findNextExtreme(series, nowMs, 'low');
 
     const rows: string[] = [];
     if (currentLevel !== null) {
@@ -909,7 +904,7 @@ export class TideStationManager {
     }
     const fcMs = this.forecastDate.getTime();
     if (Math.abs(fcMs - nowMs) > 30 * 60000) {
-      const fcLevel = interpolateAtTime(mapped, fcMs);
+      const fcLevel = interpolateAtTime(series, fcMs);
       if (fcLevel !== null) {
         rows.push(`<div class="inspect-row"><span class="k">@ ${formatTime(fcMs)}</span><span>${fcLevel.toFixed(2)} ft MLLW</span></div>`);
       }
@@ -935,8 +930,7 @@ export class TideStationManager {
     floodDir: number,
     ebbDir: number,
   ): void {
-    const mapped = series.map((p) => ({ t: p.t, v: p.v }));
-    const nowSpeed = interpolateAtTime(mapped, nowMs);
+    const nowSpeed = interpolateAtTime(series, nowMs);
     const phase = nowSpeed !== null ? (nowSpeed > 0.05 ? 'flood' : nowSpeed < -0.05 ? 'ebb' : 'slack') : 'unknown';
     const currentDir = phase === 'flood' ? floodDir : phase === 'ebb' ? ebbDir : null;
 
@@ -949,7 +943,7 @@ export class TideStationManager {
     }
     const fcMs = this.forecastDate.getTime();
     if (Math.abs(fcMs - nowMs) > 30 * 60000) {
-      const fcSpeed = interpolateAtTime(mapped, fcMs);
+      const fcSpeed = interpolateAtTime(series, fcMs);
       if (fcSpeed !== null) {
         const fcPhase = fcSpeed > 0.05 ? 'flood' : fcSpeed < -0.05 ? 'ebb' : 'slack';
         const fcDir = fcPhase === 'flood' ? floodDir : fcPhase === 'ebb' ? ebbDir : null;
@@ -1244,6 +1238,9 @@ function findNextExtreme(
 }
 
 function interpolateAtTime(data: TimedValue[], nowMs: number): number | null {
+  if (data.length === 0) return null;
+  if (nowMs <= data[0]!.t) return data[0]!.v;
+  if (nowMs >= data[data.length - 1]!.t) return data[data.length - 1]!.v;
   for (let i = 0; i < data.length - 1; i++) {
     if (data[i]!.t <= nowMs && data[i + 1]!.t >= nowMs) {
       const t0 = data[i]!.t;
@@ -1254,7 +1251,7 @@ function interpolateAtTime(data: TimedValue[], nowMs: number): number | null {
       return v0 + frac * (v1 - v0);
     }
   }
-  return data.length > 0 ? data[0]!.v : null;
+  return data[data.length - 1]!.v;
 }
 
 /**

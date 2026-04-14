@@ -88,9 +88,6 @@ export function computeAstro(date: Date): AstroParams {
 
   const I = Math.acos(0.91370 - 0.03569 * cosN);
   const sinI = Math.sin(I);
-  const cosI = Math.cos(I);
-  const cosI2 = Math.cos(I / 2);
-  const sinI2 = Math.sin(I / 2);
 
   const nu = Math.asin(0.08960 * sinN / sinI);
 
@@ -102,8 +99,8 @@ export function computeAstro(date: Date): AstroParams {
   const nup = Math.atan2(sin2I * Math.sin(nu), sin2I * Math.cos(nu) + 0.3347);
 
   // ν'' for K2
-  const sinI2sq = sinI * sinI;
-  const nupp = Math.atan2(sinI2sq * Math.sin(2 * nu), sinI2sq * Math.cos(2 * nu) + 0.0727);
+  const sinIsq = sinI * sinI;
+  const nupp = Math.atan2(sinIsq * Math.sin(2 * nu), sinIsq * Math.cos(2 * nu) + 0.0727);
 
   return {
     T: T_hour,
@@ -248,7 +245,7 @@ const CONSTITUENTS: Record<string, ConstituentSpec> = {
   'NU2':  { V0: (a) => 2*a.T - 3*a.s + 4*a.h - a.p,                 f: f_M2,  u: u_M2 },
   'MU2':  { V0: (a) => 2*a.T - 4*a.s + 4*a.h,                       f: f_M2,  u: u_M2 },
   '2N2':  { V0: (a) => 2*a.T - 4*a.s + 2*a.h + 2*a.p,               f: f_M2,  u: u_M2 },
-  'LAM2': { V0: (a) => 2*a.T - a.s + 2*a.p + 180,                   f: f_M2,  u: u_M2 },
+  'LAM2': { V0: (a) => 2*a.T - a.s + a.p + 180,                      f: f_M2,  u: u_M2 },
   'T2':   { V0: (a) => 2*a.T - a.h + a.pp,                           f: f_1,   u: u_0 },
   'R2':   { V0: (a) => 2*a.T + a.h - a.pp + 180,                    f: f_1,   u: u_0 },
   '2SM2': { V0: (a) => 2*a.T + 2*a.s - 2*a.h,                       f: f_M2,  u: (a) => -u_M2(a) },
@@ -331,37 +328,6 @@ export interface StationDatum {
 }
 
 /**
- * Compute tidal height at a single time.
- *
- * @param date     Prediction time
- * @param harmonics Array of harmonic constants from NOAA harcon API
- * @param datum    Datum offset (MSL above MLLW)
- * @returns Height in feet above MLLW
- */
-export function predictTideHeight(
-  date: Date,
-  harmonics: StationHarmonic[],
-  datum: StationDatum,
-): number {
-  const astro = computeAstro(date);
-  let height = datum.msl;
-
-  for (const hc of harmonics) {
-    const spec = CONSTITUENTS[hc.name];
-    if (!spec || hc.amplitude === 0) continue;
-
-    const V0 = mod360(spec.V0(astro));
-    const f = spec.f(astro);
-    const u = spec.u(astro);
-
-    const arg = (V0 + u - hc.phase_GMT) * DEG;
-    height += f * hc.amplitude * Math.cos(arg);
-  }
-
-  return height;
-}
-
-/**
  * Compute tidal height using pre-computed astronomical parameters.
  * Use this when computing many stations at the same time — call
  * `computeAstro(date)` once and pass it to each station.
@@ -425,7 +391,7 @@ export function predictTideSeries(
 
   // For efficiency, compute astronomical params at the midpoint and use
   // speed × dt for the fast-varying part. Node factors (f, u) and slowly-
-  // varying astronomical args are recomputed every 24 hours.
+  // varying astronomical args change negligibly over a 48h window.
   const midTime = new Date((start.getTime() + end.getTime()) / 2);
   const astro = computeAstro(midTime);
 

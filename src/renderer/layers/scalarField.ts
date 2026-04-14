@@ -164,6 +164,8 @@ export class ScalarFieldLayer implements CustomLayerInterface {
   private cmapName: ColormapName;
   private meshRes: number;
   private visible = true;
+  // Cached uniform locations per program (avoids getUniformLocation per frame)
+  private uniforms = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
 
   constructor(opts: ScalarFieldLayerOptions = {}) {
     this.id = opts.id ?? 'gribwebview-scalar';
@@ -171,6 +173,16 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     this.cmapName = opts.colormap ?? 'turbo';
     this.meshRes = Math.max(1, opts.meshResolution ?? 1);
     if (opts.valueRange) this.valueRange = opts.valueRange;
+  }
+
+  /** Get cached uniform location (avoids per-frame getUniformLocation calls). */
+  private uloc(prog: WebGLProgram, name: string): WebGLUniformLocation | null {
+    let m = this.uniforms.get(prog);
+    if (!m) { m = new Map(); this.uniforms.set(prog, m); }
+    if (m.has(name)) return m.get(name)!;
+    const loc = this.gl!.getUniformLocation(prog, name);
+    m.set(name, loc);
+    return loc;
   }
 
   onAdd(map: MlMap, glAny: WebGL2RenderingContext | WebGLRenderingContext): void {
@@ -406,29 +418,29 @@ export class ScalarFieldLayer implements CustomLayerInterface {
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.fieldTex.tex);
-    gl.uniform1i(gl.getUniformLocation(prog, 'uField'), 0);
+    gl.uniform1i(this.uloc(prog,'uField'), 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex.tex);
-    gl.uniform1i(gl.getUniformLocation(prog, 'uLut'), 1);
+    gl.uniform1i(this.uloc(prog,'uLut'), 1);
 
-    gl.uniformMatrix4fv(gl.getUniformLocation(prog, 'uMatrix'), false, matrix as Float32Array);
-    gl.uniform2f(gl.getUniformLocation(prog, 'uValueRange'), this.valueRange[0], this.valueRange[1]);
-    gl.uniform1f(gl.getUniformLocation(prog, 'uOpacity'), this.opacity);
+    gl.uniformMatrix4fv(this.uloc(prog,'uMatrix'), false, matrix as Float32Array);
+    gl.uniform2f(this.uloc(prog,'uValueRange'), this.valueRange[0], this.valueRange[1]);
+    gl.uniform1f(this.uloc(prog,'uOpacity'), this.opacity);
 
     if (useLatLon) {
       const u = this.latLonU!;
-      gl.uniform4f(gl.getUniformLocation(prog, 'uLatLonBounds'), u.lonMin, u.lonMax, u.latMin, u.latMax);
+      gl.uniform4f(this.uloc(prog,'uLatLonBounds'), u.lonMin, u.lonMax, u.latMin, u.latMax);
     } else {
       const u = this.lcc!;
-      gl.uniform1f(gl.getUniformLocation(prog, 'uLccN'), u.n);
-      gl.uniform1f(gl.getUniformLocation(prog, 'uLccF'), u.F);
-      gl.uniform1f(gl.getUniformLocation(prog, 'uLccRho0'), u.rho0);
-      gl.uniform1f(gl.getUniformLocation(prog, 'uLccLambda0'), u.lambda0);
-      gl.uniform1f(gl.getUniformLocation(prog, 'uLccRadius'), u.radius);
-      gl.uniform2f(gl.getUniformLocation(prog, 'uLccOrigin'), u.originX, u.originY);
-      gl.uniform2f(gl.getUniformLocation(prog, 'uLccStep'), u.dx, u.dy);
-      gl.uniform2f(gl.getUniformLocation(prog, 'uLccGridSize'), u.nx, u.ny);
-      gl.uniform2f(gl.getUniformLocation(prog, 'uLccScan'), u.scanX, u.scanY);
+      gl.uniform1f(this.uloc(prog,'uLccN'), u.n);
+      gl.uniform1f(this.uloc(prog,'uLccF'), u.F);
+      gl.uniform1f(this.uloc(prog,'uLccRho0'), u.rho0);
+      gl.uniform1f(this.uloc(prog,'uLccLambda0'), u.lambda0);
+      gl.uniform1f(this.uloc(prog,'uLccRadius'), u.radius);
+      gl.uniform2f(this.uloc(prog,'uLccOrigin'), u.originX, u.originY);
+      gl.uniform2f(this.uloc(prog,'uLccStep'), u.dx, u.dy);
+      gl.uniform2f(this.uloc(prog,'uLccGridSize'), u.nx, u.ny);
+      gl.uniform2f(this.uloc(prog,'uLccScan'), u.scanX, u.scanY);
     }
 
     gl.enable(gl.BLEND);

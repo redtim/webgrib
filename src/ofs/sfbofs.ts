@@ -123,10 +123,14 @@ export async function fetchSfbofsSurface(
   const buffer = await resp.arrayBuffer();
 
   const vars = parseDap2(buffer, ['u_eastward', 'v_northward', 'Latitude', 'Longitude']);
-  const uVar = vars.get('u_eastward')!;
-  const vVar = vars.get('v_northward')!;
-  const latVar = vars.get('Latitude')!;
-  const lonVar = vars.get('Longitude')!;
+  const uVar = vars.get('u_eastward');
+  const vVar = vars.get('v_northward');
+  const latVar = vars.get('Latitude');
+  const lonVar = vars.get('Longitude');
+  if (!uVar || !vVar || !latVar || !lonVar) {
+    const missing = ['u_eastward', 'v_northward', 'Latitude', 'Longitude'].filter((n) => !vars.has(n));
+    throw new Error(`SFBOFS response missing variables: ${missing.join(', ')}`);
+  }
 
   const ny = latVar.shape[0]!;
   const nx = latVar.shape[1]!;
