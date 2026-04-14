@@ -405,9 +405,15 @@ async function main(): Promise<void> {
     const displayName = variable.label;
     setStatus(`fetching ${displayName}...`);
 
-    // Use the latest available SFBOFS cycle and forecast hour 1
-    const { cycle, date } = sfbofsLatestCycle();
-    const fhour = 1; // Default to forecast hour 1 for now
+    // Map the timeline's valid time to the best SFBOFS cycle + forecast hour.
+    // SFBOFS cycles: 03z, 09z, 15z, 21z — available ~5 hours after nominal time.
+    const validDate = timeline.validDate();
+    const { cycle, date } = sfbofsLatestCycle(validDate);
+    const cycleMs = Date.UTC(
+      parseInt(date.slice(0, 4)), parseInt(date.slice(4, 6)) - 1,
+      parseInt(date.slice(6, 8)), cycle,
+    );
+    const fhour = Math.max(1, Math.min(48, Math.round((validDate.getTime() - cycleMs) / 3600000)));
 
     const field = await fetchSfbofsSurface(cycle, date, fhour);
 

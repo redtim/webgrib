@@ -100,14 +100,23 @@ export function latestCycle(now: Date = new Date()): { cycle: typeof SFBOFS_CYCL
   return { cycle, date: formatDate(now) };
 }
 
+// Cache for fetched OFS fields — keyed by "cycle:date:fhour"
+const ofsCache = new Map<string, OfsCurrentField>();
+const OFS_CACHE_MAX = 20;
+
 /**
  * Fetch surface current data for a specific SFBOFS forecast step.
+ * Results are cached in memory (up to 20 entries).
  */
 export async function fetchSfbofsSurface(
   cycle: number,
   date: string,
   fhour: number,
 ): Promise<OfsCurrentField> {
+  const cacheKey = `${cycle}:${date}:${fhour}`;
+  const cached = ofsCache.get(cacheKey);
+  if (cached) return cached;
+
   const url = opendapUrl(cycle, date, fhour);
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`SFBOFS fetch failed: ${resp.status} ${resp.statusText}`);
@@ -148,5 +157,14 @@ export async function fetchSfbofsSurface(
     v[i] = Math.abs(vVar.data[i]!) > FILL_THRESH ? NaN : vVar.data[i]!;
   }
 
-  return { u, v, lat: latVar.data, lon: lonVar.data, nx, ny, bounds: { lonMin, lonMax, latMin, latMax } };
+  const result: OfsCurrentField = { u, v, lat: latVar.data, lon: lonVar.data, nx, ny, bounds: { lonMin, lonMax, latMin, latMax } };
+
+  // Evict oldest entries if cache is full
+  if (ofsCache.size >= OFS_CACHE_MAX) {
+    const oldest = ofsCache.keys().next().value!;
+    ofsCache.delete(oldest);
+  }
+  ofsCache.set(cacheKey, result);
+
+  return result;
 }
