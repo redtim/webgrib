@@ -151,7 +151,7 @@ export class Timeline {
   }
 
   /** Compute the valid Date from cycle + fhour. */
-  private validDate(): Date {
+  validDate(): Date {
     return new Date(parseCycleUTC(this._cycle).getTime() + this._fhour * 3600000);
   }
 

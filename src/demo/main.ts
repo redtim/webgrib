@@ -25,6 +25,7 @@ import { Timeline } from './timeline.js';
 import { Legend } from './legend.js';
 import type { LegendTick } from './legend.js';
 import { LevelSlider } from './levelSlider.js';
+import { TideStationManager } from './tides.js';
 
 // Wind speed raster range in m/s — must match WIND_MAX_MS in colormaps.ts.
 const KT_TO_MS = 0.514444;
@@ -75,7 +76,7 @@ async function main(): Promise<void> {
     center: [-96, 38],
     zoom: 3.5,
     minZoom: 2,
-    maxZoom: 10,
+    maxZoom: 16,
     hash: true,
     keyboard: false,
   });
@@ -105,6 +106,7 @@ async function main(): Promise<void> {
 
   let currentVariable: CatalogVariable | null = null;
   let loading = false;
+  let tideManager: TideStationManager | null = null;
 
   // ---- UI components --------------------------------------------------------
 
@@ -117,6 +119,7 @@ async function main(): Promise<void> {
   const timeline = new Timeline({
     parent: timelineBar,
     onChange: (_cycle, _fhour) => {
+      tideManager?.setForecastTime(timeline.validDate());
       if (currentVariable && !loading) {
         void loadLevel(currentVariable, levelSlider.index, _cycle, _fhour);
       }
@@ -160,6 +163,9 @@ async function main(): Promise<void> {
   map.addLayer(scalarLayer, beforeId);
   windLayer.attach(map);
   lightningLayer.attach(map);
+
+  tideManager = new TideStationManager();
+  tideManager.attach(map);
 
   // Coastline stroke
   map.addLayer(
@@ -231,6 +237,10 @@ async function main(): Promise<void> {
     const n = lightningLayer.strikeCount;
     ltCount.textContent = n > 0 ? `(${n})` : '';
   }, 2000);
+
+  // ---- tide station toggles ---------------------------------------------------
+
+  tideManager.createToggles(layersWrap);
 
   // ---- unit preference selectors ---------------------------------------------
 
@@ -477,6 +487,11 @@ async function main(): Promise<void> {
   };
 
   map.on('click', (ev) => {
+    // Check tide station layers first — they handle their own popup
+    if (tideManager.handleClick(ev, map, (lngLat, html) => showPopup(new maplibregl.LngLat(lngLat.lng, lngLat.lat), html))) {
+      return;
+    }
+
     const { lng, lat } = ev.lngLat;
     const rows: string[] = [];
 
