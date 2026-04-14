@@ -10,7 +10,9 @@ export type ColormapName =
   | 'temperature' | 'wind'
   | 'precipitation' | 'humidity' | 'cape' | 'cin' | 'cloud' | 'snow'
   | 'lightning'
-  | 'ocean-currents';
+  | 'ocean-currents'
+  | 'water-level'
+  | 'bathymetry';
 
 export function colormap(name: ColormapName): Uint8Array {
   switch (name) {
@@ -54,6 +56,12 @@ export function colormap(name: ColormapName): Uint8Array {
     case 'ocean-currents': {
       const lut = buildFromStops(OCEAN_CURRENT_STOPS);
       lut[3] = 0; // index 0 (no current) = fully transparent
+      return lut;
+    }
+    case 'water-level': return buildFromStops(WATER_LEVEL_STOPS);
+    case 'bathymetry': {
+      const lut = buildFromPositionedStops(BATHYMETRY_STOPS);
+      lut[3] = 0; // index 0 (zero depth / dry) = fully transparent
       return lut;
     }
   }
@@ -193,4 +201,55 @@ const OCEAN_CURRENT_STOPS: Array<[number, number, number]> = [
   [10, 20, 80], [20, 60, 140], [30, 120, 160],
   [40, 180, 140], [100, 200, 80], [200, 220, 50],
   [240, 180, 40], [255, 120, 30],
+];
+// Water-level anomaly (diverging around 0): deep blue (ebb) → white → deep red (flood)
+const WATER_LEVEL_STOPS: Array<[number, number, number]> = [
+  [15, 40, 120], [60, 110, 180], [150, 190, 230],
+  [245, 245, 245],
+  [250, 180, 140], [220, 90, 70], [130, 20, 30],
+];
+// Bathymetric depth over a 0–100 m value range with nonlinear resolution.
+// Every 0.5 ft (0.1524 m) gets its own color stop between 0–3 m, using a
+// red → orange → yellow → green → teal ramp — matches nautical-chart
+// intuition where shoal water (danger) is warm and deeper water cools off.
+// Above 3 m the palette spreads through blues to navy at 100 m.
+//
+// Stop positions are expressed as depth_m / 100 so the renderer's
+// scalar range should be [0, 100] m.
+const BATHYMETRY_STOPS: Array<{ t: number; rgb: [number, number, number] }> = [
+  // Dry / edge (made fully transparent by lut[3]=0 after build).
+  { t: 0.0000, rgb: [255, 255, 255] },
+  // Danger zone (0–2 ft): deep reds.
+  { t: 0.001524, rgb: [120,   0,  20] }, // 0.5 ft
+  { t: 0.003048, rgb: [170,  20,  25] }, // 1.0 ft
+  { t: 0.004572, rgb: [210,  40,  30] }, // 1.5 ft
+  { t: 0.006096, rgb: [235,  70,  35] }, // 2.0 ft
+  // Caution (2–4 ft): oranges.
+  { t: 0.00762,  rgb: [245, 110,  40] }, // 2.5 ft
+  { t: 0.009144, rgb: [250, 140,  50] }, // 3.0 ft
+  { t: 0.010668, rgb: [252, 170,  60] }, // 3.5 ft
+  { t: 0.012192, rgb: [253, 195,  75] }, // 4.0 ft
+  // Shallow nav (4–6 ft): yellows.
+  { t: 0.013716, rgb: [253, 220,  90] }, // 4.5 ft
+  { t: 0.01524,  rgb: [250, 240, 110] }, // 5.0 ft
+  { t: 0.016764, rgb: [225, 235, 110] }, // 5.5 ft
+  { t: 0.018288, rgb: [190, 225, 110] }, // 6.0 ft — NOAA 6 ft safety line
+  // Safe shallow (6–8 ft): greens.
+  { t: 0.019812, rgb: [150, 215, 115] }, // 6.5 ft
+  { t: 0.021336, rgb: [110, 200, 125] }, // 7.0 ft
+  { t: 0.02286,  rgb: [ 80, 190, 140] }, // 7.5 ft
+  { t: 0.024384, rgb: [ 60, 180, 160] }, // 8.0 ft
+  // Transition to teal (8–10 ft).
+  { t: 0.025908, rgb: [ 50, 175, 180] }, // 8.5 ft
+  { t: 0.027432, rgb: [ 50, 170, 200] }, // 9.0 ft
+  { t: 0.028956, rgb: [ 55, 165, 215] }, // 9.5 ft
+  { t: 0.03048,  rgb: [ 70, 160, 225] }, // 10.0 ft  (≈ 3 m)
+  // 3–100 m: spread through blues to navy.
+  { t: 0.05,    rgb: [ 60, 135, 210] }, //   5 m
+  { t: 0.10,    rgb: [ 45, 110, 190] }, //  10 m
+  { t: 0.20,    rgb: [ 35,  85, 165] }, //  20 m
+  { t: 0.35,    rgb: [ 25,  60, 135] }, //  35 m
+  { t: 0.55,    rgb: [ 15,  40, 100] }, //  55 m
+  { t: 0.75,    rgb: [ 10,  25,  75] }, //  75 m
+  { t: 1.00,    rgb: [  5,  10,  40] }, // 100 m
 ];

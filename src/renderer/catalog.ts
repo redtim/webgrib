@@ -309,6 +309,20 @@ export const CATALOG: CatalogVariable[] = [
     levels: [{ label: 'Surface' }],
   },
   {
+    id: 'sfbofs-water-level', group: 'Ocean', label: 'SF Bay Water Level', kind: 'scalar',
+    source: 'ofs', ofsModel: 'sfbofs',
+    colormap: 'water-level', range: [-1.5, 1.5], dimension: 'none', unit: 'm',
+    format: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} m`,
+    levels: [{ label: 'Surface' }],
+  },
+  {
+    id: 'sfbay-water-depth', group: 'Ocean', label: 'SF Bay Water Depth', kind: 'scalar',
+    source: 'ofs', ofsModel: 'sfbofs',
+    colormap: 'bathymetry', range: [0, 100], dimension: 'none', unit: 'm',
+    format: (v: number) => `${v.toFixed(1)} m`,
+    levels: [{ label: 'Surface' }],
+  },
+  {
     id: 'apparent-wind', group: 'Ocean', label: 'Apparent Wind', kind: 'wind',
     source: 'ofs', ofsModel: 'apparent-wind',
     colormap: 'wind', range: [0, 18], dimension: 'speed',

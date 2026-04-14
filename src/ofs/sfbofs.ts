@@ -39,6 +39,16 @@ export interface OfsCurrentField {
   bounds: { lonMin: number; lonMax: number; latMin: number; latMax: number };
 }
 
+/** Scalar field on the SFBOFS regular grid (e.g., water-level zeta). */
+export interface OfsScalarField {
+  values: Float32Array;
+  lat: Float32Array;
+  lon: Float32Array;
+  nx: number;
+  ny: number;
+  bounds: { lonMin: number; lonMax: number; latMin: number; latMax: number };
+}
+
 /** Available SFBOFS forecast cycles (UTC hours). */
 export const SFBOFS_CYCLES = [3, 9, 15, 21] as const;
 
@@ -379,6 +389,9 @@ export function latestCycle(now: Date = new Date()): { cycle: typeof SFBOFS_CYCL
 const ofsCache = new Map<string, OfsCurrentField>();
 const OFS_CACHE_MAX = 20;
 
+// Cache for fetched water-level fields — keyed by "cycle:date:fhour"
+const zetaCache = new Map<string, OfsScalarField>();
+
 /**
  * Fetch surface current data for a specific SFBOFS forecast step.
  * Tries S3 range requests first; falls back to THREDDS/OPeNDAP on failure.
@@ -407,6 +420,75 @@ export async function fetchSfbofsSurface(
     ofsCache.delete(oldest);
   }
   ofsCache.set(cacheKey, result);
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Water level (zeta) — THREDDS only
+//
+// zeta is the free-surface elevation in meters relative to the model's
+// mean-sea-level datum. It is 2D (time, ny, nx) in the regulargrid files.
+// Byte offsets into the HDF5 file differ from u/v (no depth dimension), so
+// S3 range fetching would require a separate offset table — THREDDS is fine
+// for this secondary layer (~730 KB per file).
+// ---------------------------------------------------------------------------
+
+function zetaOpendapUrl(cycle: number, date: string, fhour: number): string {
+  const cc = String(cycle).padStart(2, '0');
+  const fhhh = String(fhour).padStart(3, '0');
+  const datePath = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)}`;
+  const base = `${OFS_PROXY}/thredds/dodsC/NOAA/SFBOFS/MODELS/${datePath}/sfbofs.t${cc}z.${date}.regulargrid.f${fhhh}.nc`;
+  const ce = [
+    `zeta[0:0][0:328][0:552]`,
+    `Latitude[0:328][0:552]`,
+    `Longitude[0:328][0:552]`,
+  ].join(',').replace(/\[/g, '%5B').replace(/\]/g, '%5D');
+  return `${base}.dods?${ce}`;
+}
+
+/**
+ * Fetch surface water-level (zeta) for a SFBOFS forecast step.
+ * Values are meters relative to the model datum (positive = above MSL).
+ */
+export async function fetchSfbofsWaterLevel(
+  cycle: number,
+  date: string,
+  fhour: number,
+): Promise<OfsScalarField> {
+  const cacheKey = `${cycle}:${date}:${fhour}`;
+  const cached = zetaCache.get(cacheKey);
+  if (cached) return cached;
+
+  const resp = await fetch(zetaOpendapUrl(cycle, date, fhour));
+  if (!resp.ok) throw new Error(`SFBOFS zeta fetch failed: ${resp.status} ${resp.statusText}`);
+  const buffer = await resp.arrayBuffer();
+
+  const vars = parseDap2(buffer, ['zeta', 'Latitude', 'Longitude']);
+  const zVar = vars.get('zeta');
+  const latVar = vars.get('Latitude');
+  const lonVar = vars.get('Longitude');
+  if (!zVar || !latVar || !lonVar) {
+    const missing = ['zeta', 'Latitude', 'Longitude'].filter((n) => !vars.has(n));
+    throw new Error(`SFBOFS zeta response missing variables: ${missing.join(', ')}`);
+  }
+
+  const ny = latVar.shape[0]!;
+  const nx = latVar.shape[1]!;
+  const values = new Float32Array(zVar.data.length);
+  for (let i = 0; i < values.length; i++) {
+    const z = zVar.data[i]!;
+    values[i] = Math.abs(z) > 100 ? NaN : z;
+  }
+  const bounds = computeBounds(latVar.data, lonVar.data);
+
+  const result: OfsScalarField = { values, lat: latVar.data, lon: lonVar.data, nx, ny, bounds };
+
+  if (zetaCache.size >= OFS_CACHE_MAX) {
+    const oldest = zetaCache.keys().next().value!;
+    zetaCache.delete(oldest);
+  }
+  zetaCache.set(cacheKey, result);
 
   return result;
 }

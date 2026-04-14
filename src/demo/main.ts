@@ -14,7 +14,8 @@ import { hrrrUrls, forecastQuery } from '../grib2/idx.js';
 import { DecodeClient } from '../worker/client.js';
 import { CATALOG, findVariable, displayRange, displayUnit } from '../renderer/catalog.js';
 import type { CatalogVariable, VariableLevel } from '../renderer/catalog.js';
-import { fetchSfbofsSurface, latestCycle as sfbofsLatestCycle, SFBOFS_MAX_FHOUR } from '../ofs/sfbofs.js';
+import { fetchSfbofsSurface, fetchSfbofsWaterLevel, latestCycle as sfbofsLatestCycle, SFBOFS_MAX_FHOUR } from '../ofs/sfbofs.js';
+import { computeWaterDepth } from '../bathymetry/waterDepth.js';
 import { sampleHrrrAtLatLon } from '../grib2/resample.js';
 import {
   UNIT_OPTIONS, getUnitPref, setUnitPref, onUnitChange,
@@ -421,6 +422,14 @@ async function main(): Promise<void> {
       setStatus(`Unknown OFS model: ${variable.ofsModel}`, true);
       return;
     }
+    if (variable.id === 'sfbofs-water-level') {
+      await loadSfbofsWaterLevel(variable, isStale);
+      return;
+    }
+    if (variable.id === 'sfbay-water-depth') {
+      await loadSfBayWaterDepth(variable, isStale);
+      return;
+    }
     const displayName = variable.label;
     setStatus(`fetching ${displayName}...`);
 
@@ -467,6 +476,101 @@ async function main(): Promise<void> {
     }
 
     setStatus(`${displayName} loaded (${field.nx}\u00D7${field.ny}, cycle ${date} t${String(cycle).padStart(2, '0')}z f${String(fhour).padStart(3, '0')})`);
+  }
+
+  // ---- SFBOFS water level (zeta) — scalar only, no particles ----------------
+
+  async function loadSfbofsWaterLevel(variable: CatalogVariable, isStale: () => boolean): Promise<void> {
+    const displayName = variable.label;
+    setStatus(`fetching ${displayName}...`);
+
+    const { cycle, date, fhour } = ofsSchedule(timeline.validDate());
+
+    const field = await fetchSfbofsWaterLevel(cycle, date, fhour);
+    if (isStale()) return;
+
+    let zMin = Infinity, zMax = -Infinity;
+    for (let i = 0; i < field.values.length; i++) {
+      const v = field.values[i]!;
+      if (Number.isFinite(v)) {
+        if (v < zMin) zMin = v;
+        if (v > zMax) zMax = v;
+      }
+    }
+    const scalarInput = {
+      values: field.values,
+      nx: field.nx, ny: field.ny,
+      min: Number.isFinite(zMin) ? zMin : 0,
+      max: Number.isFinite(zMax) ? zMax : 0,
+      missingValue: NaN,
+    };
+
+    if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+    scalarLayer.setVisible(true);
+    if (variable.colormap) scalarLayer.setColormap(variable.colormap);
+    scalarLayer.setDataLatLon(scalarInput, field.bounds);
+    if (variable.range) scalarLayer.setValueRange(variable.range);
+
+    // Water level is a scalar-only layer — hide any lingering particle overlay.
+    if (windLayer.isAttached()) windLayer.setVisible(false);
+
+    if (variable.colormap && variable.range) {
+      legend.update(variable.colormap, variable.range[0], variable.range[1], variable.unit ?? 'm');
+    }
+
+    if (lastFitVariable !== variable.id) {
+      lastFitVariable = variable.id;
+      map.fitBounds(
+        [[field.bounds.lonMin, field.bounds.latMin], [field.bounds.lonMax, field.bounds.latMax]],
+        { padding: 20, maxZoom: 16 },
+      );
+    }
+
+    setStatus(`${displayName} loaded (${field.nx}\u00D7${field.ny}, cycle ${date} t${String(cycle).padStart(2, '0')}z f${String(fhour).padStart(3, '0')})`);
+  }
+
+  // ---- SF Bay live water depth (CUDEM bathy + SFBOFS zeta) -----------------
+
+  async function loadSfBayWaterDepth(variable: CatalogVariable, isStale: () => boolean): Promise<void> {
+    const displayName = variable.label;
+    setStatus(`fetching ${displayName}...`);
+
+    const { cycle, date, fhour } = ofsSchedule(timeline.validDate());
+
+    const zeta = await fetchSfbofsWaterLevel(cycle, date, fhour);
+    if (isStale()) return;
+    const depth = await computeWaterDepth(zeta);
+    if (isStale()) return;
+
+    const scalarInput = {
+      values: depth.values,
+      nx: depth.nx, ny: depth.ny,
+      min: depth.min,
+      max: depth.max,
+      missingValue: NaN,
+    };
+
+    if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+    scalarLayer.setVisible(true);
+    if (variable.colormap) scalarLayer.setColormap(variable.colormap);
+    scalarLayer.setDataLatLon(scalarInput, depth.bounds);
+    if (variable.range) scalarLayer.setValueRange(variable.range);
+
+    if (windLayer.isAttached()) windLayer.setVisible(false);
+
+    if (variable.colormap && variable.range) {
+      legend.update(variable.colormap, variable.range[0], variable.range[1], variable.unit ?? 'm');
+    }
+
+    if (lastFitVariable !== variable.id) {
+      lastFitVariable = variable.id;
+      map.fitBounds(
+        [[depth.bounds.lonMin, depth.bounds.latMin], [depth.bounds.lonMax, depth.bounds.latMax]],
+        { padding: 20, maxZoom: 16 },
+      );
+    }
+
+    setStatus(`${displayName} loaded (${depth.nx}\u00D7${depth.ny}, cycle ${date} t${String(cycle).padStart(2, '0')}z f${String(fhour).padStart(3, '0')})`);
   }
 
   // ---- apparent wind (HRRR 10m wind − OFS current) --------------------------
