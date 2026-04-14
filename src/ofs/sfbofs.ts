@@ -172,21 +172,38 @@ async function fetchViaThredds(cycle: number, date: string, fhour: number): Prom
 // S3 range-request accessor
 // ---------------------------------------------------------------------------
 
-/** Build the S3 path for a regulargrid file. */
-function s3Path(cycle: number, date: string, fhour: number): string {
+/** Build the S3 object key for a regulargrid file (no proxy prefix). */
+function s3Key(cycle: number, date: string, fhour: number): string {
   const cc = String(cycle).padStart(2, '0');
   const fhhh = String(fhour).padStart(3, '0');
   const datePath = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)}`;
-  return `${OFS_PROXY}/s3/sfbofs/netcdf/${datePath}/sfbofs.t${cc}z.${date}.regulargrid.f${fhhh}.nc`;
+  return `sfbofs/netcdf/${datePath}/sfbofs.t${cc}z.${date}.regulargrid.f${fhhh}.nc`;
 }
 
-/** Fetch a byte range from the proxy and return the ArrayBuffer. */
+/** Fetch a single byte range via the proxy. */
 async function fetchRange(url: string, offset: number, length: number): Promise<ArrayBuffer> {
   const resp = await fetch(url, {
     headers: { Range: `bytes=${offset}-${offset + length - 1}` },
   });
   if (!resp.ok && resp.status !== 206) {
     throw new Error(`S3 range fetch failed: ${resp.status} ${resp.statusText}`);
+  }
+  return resp.arrayBuffer();
+}
+
+/**
+ * Batch-fetch multiple byte ranges from one S3 file in a single HTTP request.
+ * The worker fans out the range fetches to S3 in parallel and returns the
+ * concatenated bytes. This avoids the browser's per-origin connection limit.
+ */
+async function fetchRanges(
+  s3Key: string,
+  ranges: ReadonlyArray<{ offset: number; length: number }>,
+): Promise<ArrayBuffer> {
+  const r = ranges.map((s) => `${s.offset}:${s.length}`).join(',');
+  const resp = await fetch(`${OFS_PROXY}/s3-multi?file=${encodeURIComponent(s3Key)}&r=${r}`);
+  if (!resp.ok) {
+    throw new Error(`S3 multi-range fetch failed: ${resp.status} ${resp.statusText}`);
   }
   return resp.arrayBuffer();
 }
@@ -226,10 +243,14 @@ function assembleSurface(
 }
 
 /** Fetch and cache the Lat/Lon coordinate arrays from S3 (single range request). */
-async function ensureCoordinates(baseUrl: string): Promise<void> {
+async function ensureCoordinates(key: string): Promise<void> {
   if (cachedLat && cachedLon && cachedBounds) return;
 
-  const buf = await fetchRange(baseUrl, LATLON_OFFSET, LATLON_LENGTH);
+  const buf = await fetchRange(
+    `${OFS_PROXY}/s3/${key}`,
+    LATLON_OFFSET,
+    LATLON_LENGTH,
+  );
 
   // Lat and Lon are stored back-to-back as Float64LE, 329×553 each.
   const n = NY * NX;
@@ -245,26 +266,27 @@ async function ensureCoordinates(baseUrl: string): Promise<void> {
 }
 
 async function fetchViaS3(cycle: number, date: string, fhour: number): Promise<OfsCurrentField> {
-  const baseUrl = s3Path(cycle, date, fhour);
+  const key = s3Key(cycle, date, fhour);
 
-  // Fetch coordinates (cached) and all 8 surface tile slices in parallel.
-  // Each tile fetch is only ~179 KB — total ~1.4 MB for u+v.
-  const fetches = [
-    ensureCoordinates(baseUrl),
-    ...U_CHUNKS.map((c) => fetchRange(baseUrl, c.offset, CHUNK_SURFACE_BYTES)),
-    ...V_CHUNKS.map((c) => fetchRange(baseUrl, c.offset, CHUNK_SURFACE_BYTES)),
-  ] as const;
+  // Two batch requests to the worker — each fans out to S3 in parallel server-side.
+  // This keeps the browser at ≤3 concurrent connections instead of 9.
+  const uRanges = U_CHUNKS.map((c) => ({ offset: c.offset, length: CHUNK_SURFACE_BYTES }));
+  const vRanges = V_CHUNKS.map((c) => ({ offset: c.offset, length: CHUNK_SURFACE_BYTES }));
 
-  const results = await Promise.all(fetches);
+  const [, uBuf, vBuf] = await Promise.all([
+    ensureCoordinates(key),
+    fetchRanges(key, uRanges),
+    fetchRanges(key, vRanges),
+  ]);
 
-  // results[0] is void (coordinates), [1..4] are u tiles, [5..8] are v tiles
+  // Each batch response is 4 tile buffers concatenated in order.
   const uTiles = U_CHUNKS.map((c, i) => ({
-    buf: results[1 + i] as ArrayBuffer,
+    buf: uBuf.slice(i * CHUNK_SURFACE_BYTES, (i + 1) * CHUNK_SURFACE_BYTES),
     yChunk: c.yChunk,
     xChunk: c.xChunk,
   }));
   const vTiles = V_CHUNKS.map((c, i) => ({
-    buf: results[5 + i] as ArrayBuffer,
+    buf: vBuf.slice(i * CHUNK_SURFACE_BYTES, (i + 1) * CHUNK_SURFACE_BYTES),
     yChunk: c.yChunk,
     xChunk: c.xChunk,
   }));

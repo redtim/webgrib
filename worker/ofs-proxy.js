@@ -47,7 +47,16 @@ export default {
       return new Response('Not found', { status: 404 });
     }
 
-    // Route to the correct upstream based on path prefix
+    // ---- /s3-multi: batch multiple byte-range fetches into one response ----
+    // Query params:
+    //   file  = S3 key (e.g. sfbofs/netcdf/2026/04/13/sfbofs.t03z...nc)
+    //   r     = comma-separated offset:length pairs (e.g. 5879557:182820,7890577:182820)
+    // Response: concatenated raw bytes from each range, in order.
+    if (normalized === '/s3-multi') {
+      return handleS3Multi(url, request.method, allowOrigin);
+    }
+
+    // ---- Standard proxy: route to upstream based on path prefix ----
     let upstream = null;
     let strippedPath = normalized;
     for (const [prefix, host] of Object.entries(UPSTREAMS)) {
@@ -115,6 +124,85 @@ export default {
     }
   },
 };
+
+/**
+ * Batch-fetch multiple byte ranges from a single S3 file in parallel,
+ * returning the concatenated bytes in one response.
+ *
+ * This moves the fan-out from the browser (limited to 6 connections per
+ * origin on HTTP/1.1) to the worker (no such limit to S3).
+ */
+async function handleS3Multi(url, method, allowOrigin) {
+  const file = url.searchParams.get('file');
+  const ranges = url.searchParams.get('r');
+  if (!file || !ranges) {
+    return new Response('Missing file or r param', { status: 400, headers: corsHeaders(allowOrigin) });
+  }
+
+  // Validate file path — only allow paths under expected S3 prefixes
+  if (file.includes('..') || !file.match(/^[a-zA-Z0-9_/.\-]+$/)) {
+    return new Response('Invalid file path', { status: 400, headers: corsHeaders(allowOrigin) });
+  }
+
+  // Parse ranges: "offset:length,offset:length,..."
+  const parts = ranges.split(',');
+  const rangeSpecs = [];
+  for (const part of parts) {
+    const [offStr, lenStr] = part.split(':');
+    const offset = parseInt(offStr, 10);
+    const length = parseInt(lenStr, 10);
+    if (!Number.isFinite(offset) || !Number.isFinite(length) || offset < 0 || length <= 0) {
+      return new Response('Invalid range spec', { status: 400, headers: corsHeaders(allowOrigin) });
+    }
+    rangeSpecs.push({ offset, length });
+  }
+
+  const s3Base = UPSTREAMS['/s3/'];
+  const s3Url = `${s3Base}/${file}`;
+
+  try {
+    // Fetch all ranges in parallel — worker-to-S3 has no connection limit
+    const buffers = await Promise.all(
+      rangeSpecs.map(({ offset, length }) =>
+        fetch(s3Url, {
+          headers: {
+            'User-Agent': 'gribwebview-proxy/1.0',
+            Range: `bytes=${offset}-${offset + length - 1}`,
+          },
+        }).then((r) => {
+          if (!r.ok && r.status !== 206) {
+            throw new Error(`S3 returned ${r.status} for range ${offset}:${length}`);
+          }
+          return r.arrayBuffer();
+        }),
+      ),
+    );
+
+    // Concatenate all buffers
+    const totalLength = buffers.reduce((sum, b) => sum + b.byteLength, 0);
+    const combined = new Uint8Array(totalLength);
+    let pos = 0;
+    for (const buf of buffers) {
+      combined.set(new Uint8Array(buf), pos);
+      pos += buf.byteLength;
+    }
+
+    return new Response(combined.buffer, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(totalLength),
+        'Cache-Control': 'public, max-age=300',
+        ...corsHeaders(allowOrigin),
+      },
+    });
+  } catch (err) {
+    return new Response(`S3 multi-range error: ${err.message}`, {
+      status: 502,
+      headers: corsHeaders(allowOrigin),
+    });
+  }
+}
 
 function corsHeaders(origin) {
   return {
