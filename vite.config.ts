@@ -17,15 +17,15 @@ export default defineConfig({
       allow: ['.'],
     },
     proxy: {
-      '/ofs-proxy': {
+      '/ofs-proxy/thredds': {
         target: 'https://opendap.co-ops.nos.noaa.gov',
         changeOrigin: true,
         rewrite: (path: string) => path.replace(/^\/ofs-proxy/, ''),
       },
-      '/ofs-s3': {
+      '/ofs-proxy/s3': {
         target: 'https://noaa-nos-ofs-pds.s3.amazonaws.com',
         changeOrigin: true,
-        rewrite: (path: string) => path.replace(/^\/ofs-s3/, ''),
+        rewrite: (path: string) => path.replace(/^\/ofs-proxy\/s3/, ''),
       },
     },
   },
