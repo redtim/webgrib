@@ -14,6 +14,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { decodeMessage, fetchMessageBytes, hrrrUrls, walkMessages } from '../src/grib2/index.js';
+import { rrfsUrls } from '../src/grib2/idx.js';
+import type { RrfsProduct } from '../src/grib2/idx.js';
 import type { LambertConformalGrid } from '../src/grib2/types.js';
 
 async function mostRecentCycle(): Promise<string> {
@@ -123,4 +125,61 @@ test('HRRR REFC decode (spatial diff 5.3)', async (t) => {
   assert.equal(field.values.length, g.nx * g.ny);
   assert.ok(field.min >= -40 && field.min <= 100, `REFC min in dBZ range, got ${field.min}`);
   assert.ok(field.max >= -40 && field.max <= 100, `REFC max in dBZ range, got ${field.max}`);
+});
+
+// ---- RRFS (NOMADS) ---------------------------------------------------------
+
+// rrfsUrls() points at the browser CORS proxy; Node can hit NOMADS directly.
+const rrfsIdx = (cycle: string, fhour: number, product?: RrfsProduct): string =>
+  rrfsUrls(cycle, fhour, product).idx.replace(/^.*\/nomads\//, 'https://nomads.ncep.noaa.gov/');
+
+async function mostRecentRrfsCycle(): Promise<string> {
+  // The RRFS parallel feed skips cycles now and then, so look back further.
+  const now = new Date(Date.now() - 3 * 3600 * 1000);
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(now.getTime() - i * 3600 * 1000);
+    const cycle = d.toISOString().slice(0, 13).replace(/[-T]/g, '');
+    try {
+      const res = await fetch(rrfsIdx(cycle, 1), { method: 'HEAD' });
+      if (res.ok) return cycle;
+    } catch {
+      // fall through
+    }
+  }
+  throw new Error('No reachable RRFS cycle found');
+}
+
+test('RRFS CONUS shares the HRRR LCC grid (2dfld TMP 2m)', async (t) => {
+  const cycle = await maybeFetchOrSkip(mostRecentRrfsCycle, t);
+  if (!cycle) return;
+  const res = await maybeFetchOrSkip(
+    () => fetchMessageBytes(rrfsIdx(cycle, 1), { parameter: /^TMP$/, level: /^2 m above ground$/, forecast: /^1 hour fcst$/ }),
+    t,
+  );
+  if (!res) return;
+  const [msg] = [...walkMessages(res.bytes)];
+  if (!msg) throw new Error('no message parsed');
+  assert.equal(msg.section3.grid.template, 30);
+  const g = msg.section3.grid as LambertConformalGrid;
+  assert.equal(g.nx, 1799);
+  assert.equal(g.ny, 1059);
+  const field = await decodeMessage(msg);
+  assert.ok(field.min > 180 && field.max < 340, `2m TMP in K range, got ${field.min}..${field.max}`);
+});
+
+test('RRFS prslev 850 mb wind + windowed LTNG resolve', async (t) => {
+  const cycle = await maybeFetchOrSkip(mostRecentRrfsCycle, t);
+  if (!cycle) return;
+  const u = await maybeFetchOrSkip(
+    () => fetchMessageBytes(rrfsIdx(cycle, 1, 'prslev'), { parameter: /^UGRD$/, level: /^850 mb$/, forecast: /^1 hour fcst$/ }),
+    t,
+  );
+  if (!u) return;
+  const [msg] = [...walkMessages(u.bytes)];
+  if (!msg) throw new Error('no message parsed');
+  const field = await decodeMessage(msg);
+  assert.ok(field.min > -120 && field.max < 120, `850 mb U in m/s range, got ${field.min}..${field.max}`);
+
+  const ltng = await fetchMessageBytes(rrfsIdx(cycle, 1), { parameter: /^LTNG$/, level: /^entire atmosphere$/, forecast: /^0-1 hour max fcst$/ });
+  assert.ok(ltng.bytes.length > 0);
 });

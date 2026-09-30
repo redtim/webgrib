@@ -1,9 +1,10 @@
 /**
  * Cloudflare Worker — CORS proxy for NOAA OPeNDAP / THREDDS and S3.
  *
- * Supports two upstream backends:
+ * Supports three upstream backends:
  *   /thredds/...  → opendap.co-ops.nos.noaa.gov (OPeNDAP)
  *   /s3/...       → noaa-nos-ofs-pds.s3.amazonaws.com (S3, with Range support)
+ *   /nomads/...   → nomads.ncep.noaa.gov (RRFS GRIB2 + .idx, with Range support)
  *
  * Deploy:  npx wrangler deploy
  * Test:    curl https://<worker>.workers.dev/thredds/dodsC/NOAA/SFBOFS/...
@@ -13,7 +14,14 @@
 const UPSTREAMS = {
   '/thredds/': 'https://opendap.co-ops.nos.noaa.gov',
   '/s3/': 'https://noaa-nos-ofs-pds.s3.amazonaws.com',
+  '/nomads/': 'https://nomads.ncep.noaa.gov',
 };
+
+// Prefixes whose proxy path segment is not part of the upstream path.
+const STRIP_PREFIX = new Set(['/s3/', '/nomads/']);
+
+// Only RRFS is exposed from NOMADS — don't turn the worker into an open proxy.
+const NOMADS_ALLOWED = /^\/pub\/data\/nccf\/com\/rrfs\/(para|prod)\/rrfs\.\d{8}\/\d{2}\/[\w.]+$/;
 
 // Allowed origins for CORS — restrict to your app's domains
 const ALLOWED_ORIGINS = [
@@ -63,9 +71,12 @@ export default {
       if (normalized.startsWith(prefix)) {
         upstream = host;
         // For /thredds/, keep the prefix (it's part of the real path)
-        // For /s3/, strip the prefix
-        if (prefix === '/s3/') {
+        // For /s3/ and /nomads/, strip the prefix
+        if (STRIP_PREFIX.has(prefix)) {
           strippedPath = '/' + normalized.slice(prefix.length);
+        }
+        if (prefix === '/nomads/' && !NOMADS_ALLOWED.test(strippedPath)) {
+          return new Response('Not found', { status: 404 });
         }
         break;
       }

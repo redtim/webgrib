@@ -154,3 +154,89 @@ export function hrrrUrls(cycle: string, fhour: number, product: 'wrfsfcf' | 'wrf
   const base = `https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.${yyyy}${mm}${dd}/conus/hrrr.t${hh}z.${product}${fh}.grib2`;
   return { data: base, idx: base + '.idx' };
 }
+
+/**
+ * RRFS (Rapid Refresh Forecast System) deterministic CONUS output on NOMADS.
+ *
+ *   {base}/rrfs.YYYYMMDD/HH/rrfs.tHHz.{2dfld|prslev}.3km.fFFF.conus.grib2
+ *
+ * The CONUS subset is on the same 3 km Lambert Conformal grid as HRRR
+ * (1799×1059), so everything downstream of the decoder is shared. Surface
+ * and single-level fields live in `2dfld`; isobaric levels live in `prslev`.
+ *
+ * NOMADS sends no CORS headers, so requests go through the same proxy as OFS
+ * (Vite dev proxy locally, Cloudflare Worker in production).
+ *
+ * RRFS became operational on 2026-10-14 (SCN 26-48); before that only the
+ * parallel feed under `rrfs/para` exists. Flip RRFS_STREAM to 'prod' once the
+ * `rrfs/prod` directory is populated.
+ */
+export type RrfsProduct = '2dfld' | 'prslev';
+
+const RRFS_STREAM: 'para' | 'prod' = 'para';
+const NOMADS_PROXY: string =
+  (import.meta.env?.VITE_OFS_PROXY_URL as string | undefined) ?? '/ofs-proxy';
+
+export function rrfsUrls(cycle: string, fhour: number, product: RrfsProduct = '2dfld'): { data: string; idx: string } {
+  const hh = cycle.slice(8, 10);
+  const fh = String(fhour).padStart(3, '0');
+  const base = `${NOMADS_PROXY}/nomads/pub/data/nccf/com/rrfs/${RRFS_STREAM}/rrfs.${cycle.slice(0, 8)}/${hh}/rrfs.t${hh}z.${product}.3km.f${fh}.conus.grib2`;
+  return { data: base, idx: base + '.idx' };
+}
+
+/** Max forecast hour for an RRFS cycle: 84 h at 00/06/12/18z, 18 h otherwise. */
+export function rrfsMaxFhour(cycle: string): number {
+  return Number(cycle.slice(8, 10)) % 6 === 0 ? 84 : 18;
+}
+
+/**
+ * Build URLs for GEFS ensemble member files on NOMADS.
+ *
+ * member 0 = control (gec00), 1-30 = perturbation (gep01-gep30).
+ * Uses the 0.5° "a" product (pgrb2ap5) which has the most common fields.
+ */
+export function gefsUrls(cycle: string, fhour: number, member: number): { data: string; idx: string } {
+  const fh = String(fhour).padStart(3, '0');
+  const hh = cycle.slice(8, 10);
+  const prefix = member === 0 ? 'gec00' : `gep${String(member).padStart(2, '0')}`;
+  const base = `https://noaa-gefs-pds.s3.amazonaws.com/gefs.${cycle.slice(0, 8)}/${hh}/atmos/pgrb2ap5/${prefix}.t${hh}z.pgrb2a.0p50.f${fh}`;
+  return { data: base, idx: base + '.idx' };
+}
+
+/** URL for the pre-computed ensemble mean (geavg) or spread (gespr) file. */
+export function gefsStatsUrls(cycle: string, fhour: number, stat: 'mean' | 'spread'): { data: string; idx: string } {
+  const fh = String(fhour).padStart(3, '0');
+  const hh = cycle.slice(8, 10);
+  const prefix = stat === 'mean' ? 'geavg' : 'gespr';
+  const base = `https://noaa-gefs-pds.s3.amazonaws.com/gefs.${cycle.slice(0, 8)}/${hh}/atmos/pgrb2ap5/${prefix}.t${hh}z.pgrb2a.0p50.f${fh}`;
+  return { data: base, idx: base + '.idx' };
+}
+
+/**
+ * Recent GEFS cycles. GEFS runs every 6 hours (00/06/12/18z).
+ * Applies a production delay to avoid requesting cycles that aren't published yet.
+ */
+export function gefsRecentCycles(count: number, productionDelayHours = 7): string[] {
+  const now = new Date(Date.now() - productionDelayHours * 3600 * 1000);
+  // Round down to the nearest 6-hour cycle
+  const cycleHour = Math.floor(now.getUTCHours() / 6) * 6;
+  const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cycleHour));
+  const cycles: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(base.getTime() - i * 6 * 3600 * 1000);
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    const h = String(d.getUTCHours()).padStart(2, '0');
+    cycles.push(`${y}${m}${day}${h}`);
+  }
+  return cycles;
+}
+
+/** Valid GEFS forecast hours — 3-hourly to 240h, then 12-hourly to 384h. */
+export const GEFS_FHOURS: number[] = (() => {
+  const hours: number[] = [];
+  for (let h = 0; h <= 240; h += 3) hours.push(h);
+  for (let h = 246; h <= 384; h += 6) hours.push(h);
+  return hours;
+})();

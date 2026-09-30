@@ -1,5 +1,5 @@
 /**
- * Demo entry point. Wires a MapLibre map with HRRR weather layers driven
+ * Demo entry point. Wires a MapLibre map with HRRR/RRFS weather layers driven
  * by the catalog (variable + levels), a grouped picker panel, level slider,
  * timeline control, and legend.
  *
@@ -9,14 +9,16 @@
  */
 
 import maplibregl from 'maplibre-gl';
-import { ScalarFieldLayer, WindyLayer, LightningLayer } from '../renderer/index.js';
-import { hrrrUrls, forecastQuery } from '../grib2/idx.js';
+import { ScalarFieldLayer, WindyLayer, LightningLayer, IsobarLayer } from '../renderer/index.js';
+import { hrrrUrls, rrfsUrls, forecastQuery, gefsUrls, gefsStatsUrls, GEFS_FHOURS } from '../grib2/idx.js';
+import type { LatLonGrid, GridDefinition, LambertConformalGrid } from '../grib2/types.js';
 import { DecodeClient } from '../worker/client.js';
-import { CATALOG, findVariable, displayRange, displayUnit } from '../renderer/catalog.js';
-import type { CatalogVariable, VariableLevel } from '../renderer/catalog.js';
+import { CATALOG, findVariable, displayRange, displayUnit, isAvailableFor } from '../renderer/catalog.js';
+import type { CatalogVariable, VariableLevel, DeterministicModel, LayerQuery } from '../renderer/catalog.js';
 import { fetchSfbofsSurface, fetchSfbofsWaterLevel, latestCycle as sfbofsLatestCycle, SFBOFS_MAX_FHOUR } from '../ofs/sfbofs.js';
 import { computeWaterDepth } from '../bathymetry/waterDepth.js';
 import { sampleHrrrAtLatLon } from '../grib2/resample.js';
+import type { LatLonBounds } from '../renderer/projections/latlon.js';
 import {
   UNIT_OPTIONS, getUnitPref, setUnitPref, onUnitChange,
   convertSpeed, unitLabel,
@@ -55,6 +57,111 @@ function windLegendArgs(): [number, number, string, LegendTick[]] {
   });
   const maxDisplay = convertSpeed(WIND_MAX, u);
   return [0, maxDisplay, unitLabel('speed'), ticks];
+}
+
+const MODEL_NAMES: Record<DeterministicModel, string> = { hrrr: 'HRRR', rrfs: 'RRFS' };
+
+/**
+ * .idx URL for a deterministic-model level. HRRR keeps everything in one
+ * wrfsfc file; RRFS splits isobaric levels into prslev.
+ */
+function deterministicIdxUrl(model: DeterministicModel, cycle: string, fhour: number, level?: VariableLevel): string {
+  return model === 'rrfs'
+    ? rrfsUrls(cycle, fhour, level?.rrfsProduct).idx
+    : hrrrUrls(cycle, fhour).idx;
+}
+
+/** Per-model scalar query — RRFS encodes a few records differently. */
+function scalarQueryFor(model: DeterministicModel, level: VariableLevel): LayerQuery | undefined {
+  return (model === 'rrfs' && level.rrfsQuery) || level.query;
+}
+
+/**
+ * Cheap existence check for a model cycle: a 1-byte ranged GET of its f000
+ * .idx (the HRRR bucket's CORS policy rejects HEAD).
+ */
+async function cycleExists(model: DeterministicModel, cycle: string): Promise<boolean> {
+  // no-store: a cached non-CORS response for the same URL would fail the CORS check.
+  const res = await fetch(deterministicIdxUrl(model, cycle, 0), { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+  void res.body?.cancel();
+  return res.ok;
+}
+
+type GefsMemberChoice = number | 'mean' | 'spread';
+
+const GEFS_MEMBER_COUNT = 31; // 0 = control, 1-30 = perturbations
+
+function gefsIdxUrlsForAllMembers(cycle: string, fhour: number): string[] {
+  return Array.from({ length: GEFS_MEMBER_COUNT }, (_, i) => gefsUrls(cycle, fhour, i).idx);
+}
+
+function latLonGridToBounds(grid: LatLonGrid): LatLonBounds {
+  let lo1 = grid.lo1;
+  let lo2 = grid.lo2;
+  if (lo1 > 180) lo1 -= 360;
+  if (lo2 > 180) lo2 -= 360;
+  return {
+    lonMin: Math.min(lo1, lo2),
+    lonMax: Math.max(lo1, lo2),
+    latMin: Math.min(grid.la1, grid.la2),
+    latMax: Math.max(grid.la1, grid.la2),
+  };
+}
+
+/**
+ * GEFS global grids start at 0°E. Shift data so it starts at -180° for
+ * MapLibre's coordinate system. Returns shifted values and updated bounds.
+ */
+function shiftGlobalGrid(
+  values: Float32Array,
+  nx: number,
+  ny: number,
+  grid: LatLonGrid,
+): { values: Float32Array; bounds: LatLonBounds } {
+  // Clamp to Mercator-safe range (±85.05° is the Web Mercator limit)
+  const MAX_LAT = 85.05;
+  const clampBounds = (b: LatLonBounds): LatLonBounds => ({
+    ...b,
+    latMin: Math.max(b.latMin, -MAX_LAT),
+    latMax: Math.min(b.latMax, MAX_LAT),
+  });
+
+  const needFlipLat = grid.la1 > grid.la2;
+  const needShiftLon = grid.lo1 > 180 || grid.lo2 > 180;
+
+  if (!needFlipLat && !needShiftLon) {
+    return { values, bounds: clampBounds(latLonGridToBounds(grid)) };
+  }
+
+  const splitCol = needShiftLon ? Math.round(180 / grid.dx) : 0;
+  const out = new Float32Array(values.length);
+
+  for (let row = 0; row < ny; row++) {
+    const srcRow = needFlipLat ? (ny - 1 - row) : row;
+    const srcOff = srcRow * nx;
+    const dstOff = row * nx;
+
+    if (needShiftLon) {
+      const rightCount = nx - splitCol;
+      out.set(values.subarray(srcOff + splitCol, srcOff + nx), dstOff);
+      out.set(values.subarray(srcOff, srcOff + splitCol), dstOff + rightCount);
+    } else {
+      out.set(values.subarray(srcOff, srcOff + nx), dstOff);
+    }
+  }
+
+  const lonMin = needShiftLon ? -180 : Math.min(grid.lo1, grid.lo2);
+  const lonMax = needShiftLon ? 180 - grid.dx : Math.max(grid.lo1, grid.lo2);
+
+  return {
+    values: out,
+    bounds: clampBounds({
+      lonMin,
+      lonMax,
+      latMin: Math.min(grid.la1, grid.la2),
+      latMax: Math.max(grid.la1, grid.la2),
+    }),
+  };
 }
 
 const setStatus = (text: string, error = false): void => {
@@ -114,12 +221,15 @@ async function main(): Promise<void> {
   ];
   const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9, colorScale: GREY_PARTICLES });
   const lightningLayer = new LightningLayer();
+  const isobarLayer = new IsobarLayer();
   const client = new DecodeClient();
 
   let currentVariable: CatalogVariable | null = null;
   let loadGen = 0;
   let lastFitVariable: string | null = null; // track which variable we last zoomed to
   let tideManager: TideStationManager | null = null;
+  let gefsMember: GefsMemberChoice = 'mean';
+  let isobarsEnabled = false;
 
   // ---- UI components --------------------------------------------------------
 
@@ -131,6 +241,7 @@ async function main(): Promise<void> {
 
   const timeline = new Timeline({
     parent: timelineBar,
+    probeCycle: cycleExists,
     onChange: (_cycle, _fhour) => {
       tideManager?.setForecastTime(timeline.validDate());
       if (currentVariable) {
@@ -153,6 +264,14 @@ async function main(): Promise<void> {
     onSelect: (variable) => {
       currentVariable = variable;
       levelSlider.setLevels(variable.levels);
+      // Switch timeline between deterministic (HRRR/RRFS) and GEFS modes
+      const needsGefs = variable.source === 'gefs';
+      if (needsGefs && timeline.source !== 'gefs') {
+        timeline.setSource('gefs', GEFS_FHOURS);
+      } else if (!needsGefs && timeline.source === 'gefs') {
+        timeline.setSource(timeline.model);
+      }
+      gefsMemberWrap.style.display = needsGefs ? '' : 'none';
       void loadLevel(variable, 0, timeline.cycle, timeline.fhour);
     },
   });
@@ -175,6 +294,7 @@ async function main(): Promise<void> {
 
   map.addLayer(scalarLayer, beforeId);
   windLayer.attach(map);
+  isobarLayer.attach(map);
   lightningLayer.attach(map);
 
   tideManager = new TideStationManager();
@@ -251,6 +371,47 @@ async function main(): Promise<void> {
     ltCount.textContent = n > 0 ? `(${n})` : '';
   }, 2000);
 
+  // ---- isobar toggle ----------------------------------------------------------
+
+  const isoToggle = document.createElement('div');
+  isoToggle.style.cssText = 'margin-top:4px;';
+  isoToggle.innerHTML = `
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 6px;font-size:11px;">
+      <input type="checkbox" id="toggle-isobars" style="margin:0" />
+      <span class="layer-kind" style="background:#1a2a3a;color:#8bc4ea;width:16px;height:16px;border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;flex-shrink:0">P</span>
+      <span>MSLP Isobars</span>
+    </label>`;
+  layersWrap.appendChild(isoToggle);
+
+  const isoCheckbox = document.getElementById('toggle-isobars') as HTMLInputElement;
+  isoCheckbox.addEventListener('change', () => {
+    isobarsEnabled = isoCheckbox.checked;
+    isobarLayer.setVisible(isobarsEnabled);
+    if (isobarsEnabled && currentVariable?.source === 'gefs') {
+      void fetchAndShowIsobars(timeline.cycle, timeline.fhour);
+    }
+  });
+
+  async function fetchAndShowIsobars(cycle: string, fhour: number): Promise<void> {
+    if (!isobarsEnabled) return;
+    const fcRe = forecastQuery(fhour);
+    const query = { parameter: /^PRMSL$/, level: /^mean sea level$/, forecast: fcRe };
+
+    try {
+      // Always use ensemble mean for isobar overlay (most useful synoptic view)
+      const urls = gefsMember === 'mean' || gefsMember === 'spread'
+        ? gefsStatsUrls(cycle, fhour, 'mean')
+        : gefsUrls(cycle, fhour, gefsMember);
+      const result = await client.decode(urls.idx, query);
+      if (result.grid.template !== 0) return;
+      const shifted = shiftGlobalGrid(result.field.values, result.field.nx, result.field.ny, result.grid as LatLonGrid);
+      isobarLayer.setData(shifted.values, result.field.nx, result.field.ny, shifted.bounds);
+      isobarLayer.setVisible(true);
+    } catch (err) {
+      console.warn('Failed to load isobar data:', err);
+    }
+  }
+
   // ---- tide station toggles ---------------------------------------------------
 
   tideManager.createToggles(layersWrap);
@@ -292,6 +453,42 @@ async function main(): Promise<void> {
   }
   layersWrap.appendChild(unitWrap);
 
+  // ---- GEFS member picker -----------------------------------------------------
+
+  const gefsMemberWrap = document.createElement('div');
+  gefsMemberWrap.style.cssText = 'margin-top:8px;border-top:1px solid #30363d;padding-top:6px;display:none;';
+  const gefsMemberTitle = document.createElement('div');
+  gefsMemberTitle.style.cssText = 'color:#8b949e;font-size:10px;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;';
+  gefsMemberTitle.textContent = 'Ensemble Member';
+  gefsMemberWrap.appendChild(gefsMemberTitle);
+
+  const gefsMemberSel = document.createElement('select');
+  gefsMemberSel.style.cssText = 'background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:3px;font-size:11px;font-family:inherit;padding:2px 4px;width:100%;';
+  const memberOptions: { value: string; label: string }[] = [
+    { value: 'mean', label: 'Ensemble Mean' },
+    { value: 'spread', label: 'Ensemble Spread' },
+    { value: '0', label: 'Control (c00)' },
+  ];
+  for (let i = 1; i <= 30; i++) {
+    memberOptions.push({ value: String(i), label: `Member ${String(i).padStart(2, '0')}` });
+  }
+  for (const opt of memberOptions) {
+    const o = document.createElement('option');
+    o.value = opt.value;
+    o.textContent = opt.label;
+    if (opt.value === 'mean') o.selected = true;
+    gefsMemberSel.appendChild(o);
+  }
+  gefsMemberSel.addEventListener('change', () => {
+    const v = gefsMemberSel.value;
+    gefsMember = v === 'mean' || v === 'spread' ? v : parseInt(v, 10);
+    if (currentVariable?.source === 'gefs') {
+      void loadLevel(currentVariable, levelSlider.index, timeline.cycle, timeline.fhour);
+    }
+  });
+  gefsMemberWrap.appendChild(gefsMemberSel);
+  layersWrap.appendChild(gefsMemberWrap);
+
   // Refresh legend when unit preferences change
   function refreshLegend(): void {
     if (!currentVariable?.colormap) return;
@@ -324,6 +521,11 @@ async function main(): Promise<void> {
     const level = variable.levels[levelIndex];
     if (!level) return;
 
+    // Hide isobars when not on a GEFS variable
+    if (variable.source !== 'gefs') {
+      isobarLayer.setVisible(false);
+    }
+
     // Route OFS variables to the OFS loader
     if (variable.source === 'ofs') {
       try {
@@ -335,33 +537,55 @@ async function main(): Promise<void> {
       return;
     }
 
-    const urls = hrrrUrls(cycle, fhour);
+    // Route GEFS variables to the GEFS loader
+    if (variable.source === 'gefs') {
+      try {
+        await loadGefsLevel(variable, levelIndex, cycle, fhour, isStale);
+      } catch (err) {
+        if (isStale()) return;
+        setStatus(err instanceof Error ? err.message : String(err), true);
+      }
+      return;
+    }
+
+    const model = timeline.model;
+    const modelName = MODEL_NAMES[model];
+    const idxUrl = deterministicIdxUrl(model, cycle, fhour, level);
     const fcRe = forecastQuery(fhour);
     const displayName = variable.levels.length > 1
       ? `${variable.label} @ ${level.label}`
       : variable.label;
-    setStatus(`fetching ${displayName}...`);
+
+    if (!isAvailableFor(variable, model)) {
+      scalarLayer.setVisible(false);
+      windLayer.setVisible(false);
+      legend.hide();
+      setStatus(`${displayName} is not published by ${modelName}`, true);
+      return;
+    }
+    setStatus(`fetching ${modelName} ${displayName}...`);
 
     try {
-      if (variable.kind === 'scalar' && level.query) {
-        const layerFcRe = level.query.forecast?.(fhour) ?? fcRe;
-        // Accumulated fields have no data at analysis time (fhour 0)
-        if (level.query.forecast && fhour === 0) {
+      const query = scalarQueryFor(model, level);
+      if (variable.kind === 'scalar' && query) {
+        const layerFcRe = query.forecast?.(fhour) ?? fcRe;
+        // Accumulated / windowed fields have no data at analysis time (fhour 0)
+        if (query.forecast && fhour === 0) {
           scalarLayer.setVisible(false);
           windLayer.setVisible(false);
           legend.hide();
           setStatus(`${displayName} — no data at analysis hour`);
           return;
         }
-        const { field, grid } = await client.decode(urls.idx, {
-          parameter: level.query.parameter,
-          level: level.query.level,
+        const { field, grid } = await client.decode(idxUrl, {
+          parameter: query.parameter,
+          level: query.level,
           forecast: layerFcRe,
         });
         if (isStale()) return;
         if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
         scalarLayer.setVisible(true);
-        scalarLayer.setData({ ...field, missingValue: NaN }, grid);
+        scalarLayer.setData({ ...field, missingValue: NaN }, grid as LambertConformalGrid);
         if (variable.colormap) scalarLayer.setColormap(variable.colormap);
         scalarLayer.setValueRange(variable.range!);
         windLayer.setVisible(false);
@@ -370,10 +594,10 @@ async function main(): Promise<void> {
           const dr = displayRange(variable);
           legend.update(variable.colormap, dr[0], dr[1], displayUnit(variable));
         }
-        setStatus(displayName);
+        setStatus(`${modelName} ${displayName}`);
       } else if (variable.kind === 'wind' && level.queryU && level.queryV) {
         const { u, v, grid } = await client.decodePair(
-          urls.idx,
+          idxUrl,
           { parameter: level.queryU.parameter, level: level.queryU.level, forecast: fcRe },
           { parameter: level.queryV.parameter, level: level.queryV.level, forecast: fcRe },
         );
@@ -394,16 +618,16 @@ async function main(): Promise<void> {
         if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
         scalarLayer.setVisible(true);
         scalarLayer.setColormap('wind');
-        scalarLayer.setData(speedField, grid);
+        scalarLayer.setData(speedField, grid as LambertConformalGrid);
         scalarLayer.setValueRange(variable.range!);
 
         // Show wind particles on top
         if (!windLayer.isAttached()) windLayer.attach(map);
         windLayer.setVisible(true);
-        windLayer.setWind({ ...u, missingValue: NaN }, { ...v, missingValue: NaN }, grid);
+        windLayer.setWind({ ...u, missingValue: NaN }, { ...v, missingValue: NaN }, grid as LambertConformalGrid);
 
         legend.update('wind', ...windLegendArgs());
-        setStatus(`${displayName} loaded (${u.nx}\u00D7${u.ny})`);
+        setStatus(`${modelName} ${displayName} loaded (${u.nx}\u00D7${u.ny})`);
       }
     } catch (err) {
       if (isStale()) return;
@@ -573,7 +797,7 @@ async function main(): Promise<void> {
     setStatus(`${displayName} loaded (${depth.nx}\u00D7${depth.ny}, cycle ${date} t${String(cycle).padStart(2, '0')}z f${String(fhour).padStart(3, '0')})`);
   }
 
-  // ---- apparent wind (HRRR 10m wind − OFS current) --------------------------
+  // ---- apparent wind (HRRR/RRFS 10m wind − OFS current) ---------------------
 
   async function loadApparentWind(variable: CatalogVariable, isStale: () => boolean): Promise<void> {
     const displayName = variable.label;
@@ -581,26 +805,27 @@ async function main(): Promise<void> {
 
     const { cycle: ofsCycle, date: ofsDate, fhour: ofsFhour } = ofsSchedule(timeline.validDate());
 
-    // HRRR cycle/fhour from timeline
-    const hrrrUrlSet = hrrrUrls(timeline.cycle, timeline.fhour);
+    // Deterministic model cycle/fhour from timeline (10 m wind is in RRFS 2dfld)
+    const model = timeline.model;
+    const windIdxUrl = deterministicIdxUrl(model, timeline.cycle, timeline.fhour);
     const fcRe = forecastQuery(timeline.fhour);
 
     // Fetch both in parallel
     const [ofsField, hrrrWind] = await Promise.all([
       fetchSfbofsSurface(ofsCycle, ofsDate, ofsFhour),
       client.decodePair(
-        hrrrUrlSet.idx,
+        windIdxUrl,
         { parameter: /^UGRD$/, level: /^10 m above ground$/, forecast: fcRe },
         { parameter: /^VGRD$/, level: /^10 m above ground$/, forecast: fcRe },
       ),
     ]);
     if (isStale()) return;
 
-    // Resample HRRR wind onto the OFS grid (true-north frame)
+    // Resample model wind onto the OFS grid (true-north frame) — HRRR and RRFS share the LCC grid
     const hrrrOnOfs = sampleHrrrAtLatLon(
       { ...hrrrWind.u, missingValue: NaN },
       { ...hrrrWind.v, missingValue: NaN },
-      hrrrWind.grid,
+      hrrrWind.grid as LambertConformalGrid,
       ofsField.nx, ofsField.ny,
       ofsField.bounds,
     );
@@ -658,7 +883,189 @@ async function main(): Promise<void> {
       );
     }
 
-    setStatus(`${displayName} loaded (HRRR t${timeline.cycle.slice(8)}z f${String(timeline.fhour).padStart(2, '0')} + SFBOFS t${String(ofsCycle).padStart(2, '0')}z f${String(ofsFhour).padStart(3, '0')})`);
+    setStatus(`${displayName} loaded (${MODEL_NAMES[model]} t${timeline.cycle.slice(8)}z f${String(timeline.fhour).padStart(2, '0')} + SFBOFS t${String(ofsCycle).padStart(2, '0')}z f${String(ofsFhour).padStart(3, '0')})`);
+  }
+
+  // ---- load GEFS variable ----------------------------------------------------
+
+  async function loadGefsLevel(
+    variable: CatalogVariable,
+    levelIndex: number,
+    cycle: string,
+    fhour: number,
+    isStale: () => boolean,
+  ): Promise<void> {
+    const level = variable.levels[levelIndex];
+    if (!level) return;
+
+    const displayName = variable.levels.length > 1
+      ? `${variable.label} @ ${level.label}`
+      : variable.label;
+    const memberLabel = typeof gefsMember === 'number'
+      ? (gefsMember === 0 ? 'control' : `member ${String(gefsMember).padStart(2, '0')}`)
+      : gefsMember;
+    setStatus(`fetching ${displayName} (${memberLabel})...`);
+
+    if (variable.kind === 'wind' && level.queryU && level.queryV) {
+      await loadGefsWind(variable, level, cycle, fhour, displayName, isStale);
+    } else if (variable.kind === 'scalar' && level.query) {
+      await loadGefsScalar(variable, level, cycle, fhour, displayName, isStale);
+    }
+
+    // Update isobar overlay if enabled
+    if (isobarsEnabled && !isStale()) {
+      void fetchAndShowIsobars(cycle, fhour);
+    }
+  }
+
+  async function loadGefsScalar(
+    variable: CatalogVariable,
+    level: VariableLevel,
+    cycle: string,
+    fhour: number,
+    displayName: string,
+    isStale: () => boolean,
+  ): Promise<void> {
+    const fcRe = forecastQuery(fhour);
+    const query = {
+      parameter: level.query!.parameter,
+      level: level.query!.level,
+      forecast: fcRe,
+    };
+
+    let field: { values: Float32Array; nx: number; ny: number; min: number; max: number; missingValue: number };
+    let grid: GridDefinition;
+
+    if (gefsMember === 'mean' || gefsMember === 'spread') {
+      const urls = gefsStatsUrls(cycle, fhour, gefsMember);
+      const result = await client.decode(urls.idx, query);
+      if (isStale()) return;
+      grid = result.grid;
+      field = { ...result.field, missingValue: NaN };
+    } else {
+      const urls = gefsUrls(cycle, fhour, gefsMember);
+      const result = await client.decode(urls.idx, query);
+      if (isStale()) return;
+      grid = result.grid;
+      field = { ...result.field, missingValue: NaN };
+    }
+
+    if (grid.template !== 0) throw new Error('GEFS data expected lat/lon grid');
+    const shifted = shiftGlobalGrid(field.values, field.nx, field.ny, grid as LatLonGrid);
+    field = { ...field, values: shifted.values };
+    const bounds = shifted.bounds;
+
+    if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+    scalarLayer.setVisible(true);
+    const cmap = gefsMember === 'spread' ? 'spread' as const : variable.colormap;
+    if (cmap) scalarLayer.setColormap(cmap);
+    scalarLayer.setDataLatLon(field, bounds);
+    if (variable.range) scalarLayer.setValueRange(
+      gefsMember === 'spread' ? [0, (variable.range[1] - variable.range[0]) * 0.15] : variable.range,
+    );
+    windLayer.setVisible(false);
+
+    if (cmap) {
+      const range = gefsMember === 'spread'
+        ? [0, (variable.range![1] - variable.range![0]) * 0.15] as [number, number]
+        : (variable.range ?? [field.min, field.max]);
+      const unit = gefsMember === 'spread' ? (variable.unit ?? '') : displayUnit(variable);
+      legend.update(cmap, range[0], range[1], unit);
+    }
+
+    setStatus(`${displayName} (${typeof gefsMember === 'number' ? (gefsMember === 0 ? 'control' : `m${String(gefsMember).padStart(2, '0')}`) : gefsMember}) loaded (${field.nx}×${field.ny})`);
+  }
+
+  async function loadGefsWind(
+    variable: CatalogVariable,
+    level: VariableLevel,
+    cycle: string,
+    fhour: number,
+    displayName: string,
+    isStale: () => boolean,
+  ): Promise<void> {
+    const fcRe = forecastQuery(fhour);
+    const queryU = { parameter: level.queryU!.parameter, level: level.queryU!.level, forecast: fcRe };
+    const queryV = { parameter: level.queryV!.parameter, level: level.queryV!.level, forecast: fcRe };
+
+    let uField: { values: Float32Array; nx: number; ny: number; min: number; max: number };
+    let vField: { values: Float32Array; nx: number; ny: number; min: number; max: number };
+    let grid: GridDefinition;
+    let isSpread = false;
+
+    if (gefsMember === 'mean') {
+      const urls = gefsStatsUrls(cycle, fhour, 'mean');
+      const result = await client.decodePair(urls.idx, queryU, queryV);
+      if (isStale()) return;
+      uField = result.u;
+      vField = result.v;
+      grid = result.grid;
+    } else if (gefsMember === 'spread') {
+      // Fetch pre-computed spread U/V and show speed spread as a scalar field
+      const urls = gefsStatsUrls(cycle, fhour, 'spread');
+      const result = await client.decodePair(urls.idx, queryU, queryV);
+      if (isStale()) return;
+      grid = result.grid;
+
+      // Compute wind speed spread magnitude from U/V spreads
+      const spreadSpeed = new Float32Array(result.u.values.length);
+      for (let i = 0; i < spreadSpeed.length; i++) {
+        spreadSpeed[i] = Math.hypot(result.u.values[i]!, result.v.values[i]!);
+      }
+
+      if (grid.template !== 0) throw new Error('GEFS data expected lat/lon grid');
+      const shifted = shiftGlobalGrid(spreadSpeed, result.u.nx, result.u.ny, grid as LatLonGrid);
+
+      if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+      scalarLayer.setVisible(true);
+      scalarLayer.setColormap('spread');
+      scalarLayer.setDataLatLon({ values: shifted.values, nx: result.u.nx, ny: result.u.ny, min: 0, max: 15, missingValue: NaN }, shifted.bounds);
+      scalarLayer.setValueRange([0, 15]);
+      windLayer.setVisible(false);
+      legend.update('spread', 0, 15, 'm/s');
+      setStatus(`${displayName} (spread) loaded (${result.u.nx}×${result.u.ny})`);
+      return;
+    } else {
+      const urls = gefsUrls(cycle, fhour, gefsMember);
+      const result = await client.decodePair(urls.idx, queryU, queryV);
+      if (isStale()) return;
+      uField = result.u;
+      vField = result.v;
+      grid = result.grid;
+    }
+
+    if (grid.template !== 0) throw new Error('GEFS data expected lat/lon grid');
+    const llGrid = grid as LatLonGrid;
+    const shiftedU = shiftGlobalGrid(uField.values, uField.nx, uField.ny, llGrid);
+    const shiftedV = shiftGlobalGrid(vField.values, vField.nx, vField.ny, llGrid);
+    const bounds = shiftedU.bounds;
+
+    // Compute wind speed magnitude for the scalar raster
+    const speed = new Float32Array(shiftedU.values.length);
+    let sMin = Infinity, sMax = -Infinity;
+    for (let i = 0; i < speed.length; i++) {
+      const s = Math.hypot(shiftedU.values[i]!, shiftedV.values[i]!);
+      speed[i] = Number.isNaN(s) ? NaN : s;
+      if (s < sMin && Number.isFinite(s)) sMin = s;
+      if (s > sMax && Number.isFinite(s)) sMax = s;
+    }
+    const speedField = { values: speed, nx: uField.nx, ny: uField.ny, min: sMin, max: sMax, missingValue: NaN };
+
+    if (!map.getLayer('hrrr-scalar')) map.addLayer(scalarLayer, beforeId);
+    scalarLayer.setVisible(true);
+    if (variable.colormap) scalarLayer.setColormap(variable.colormap);
+    scalarLayer.setDataLatLon(speedField, bounds);
+    if (variable.range) scalarLayer.setValueRange(variable.range);
+
+    if (!windLayer.isAttached()) windLayer.attach(map);
+    windLayer.setVisible(true);
+    windLayer.setWindLatLon(shiftedU.values, shiftedV.values, uField.nx, uField.ny, bounds);
+
+    legend.update('wind', ...windLegendArgs());
+    const memberLabel = typeof gefsMember === 'number'
+      ? (gefsMember === 0 ? 'control' : `m${String(gefsMember).padStart(2, '0')}`)
+      : gefsMember;
+    setStatus(`${displayName} (${memberLabel}) loaded (${uField.nx}×${uField.ny})`);
   }
 
   // ---- keyboard shortcuts ---------------------------------------------------

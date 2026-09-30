@@ -1,6 +1,7 @@
 export { ScalarFieldLayer } from './layers/scalarField.js';
 export { WindyLayer } from './layers/windyLayer.js';
 export { LightningLayer } from './layers/lightning.js';
+export { IsobarLayer } from './layers/isobarLayer.js';
 export { colormap } from './colormaps.js';
 export type { ColormapName } from './colormaps.js';
 export type { ScalarFieldLayerOptions } from './layers/scalarField.js';

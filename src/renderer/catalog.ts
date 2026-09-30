@@ -1,11 +1,12 @@
 /**
- * Declarative catalog of HRRR weather variables, each with one or more
+ * Declarative catalog of HRRR/RRFS weather variables, each with one or more
  * atmospheric levels. The panel shows variables; selecting one reveals a
  * level slider to move up/down the atmosphere.
  */
 
 import type { ColormapName } from './colormaps.js';
 import { accForecastQuery } from '../grib2/idx.js';
+import type { RrfsProduct } from '../grib2/idx.js';
 import {
   getUnitPref, convertTemp, convertSpeed, convertLength, convertDistance,
   unitLabel,
@@ -14,6 +15,9 @@ import type { Dimension } from '../demo/units.js';
 
 export type { Dimension };
 export type LayerKind = 'scalar' | 'wind';
+
+/** Deterministic CONUS models that share the 3 km LCC grid and this catalog. */
+export type DeterministicModel = 'hrrr' | 'rrfs';
 
 export interface LayerQuery {
   parameter: RegExp;
@@ -30,6 +34,10 @@ export interface VariableLevel {
   /** For wind layers: U and V queries. */
   queryU?: LayerQuery;
   queryV?: LayerQuery;
+  /** Which RRFS file holds this level. Defaults to '2dfld'. */
+  rrfsProduct?: RrfsProduct;
+  /** RRFS query when its .idx encodes the record differently from HRRR. */
+  rrfsQuery?: LayerQuery;
 }
 
 /** A weather variable with one or more vertical levels. */
@@ -49,8 +57,10 @@ export interface CatalogVariable {
   unit?: string;
   /** Format a raw (native-unit) value for display, respecting the current unit pref. */
   format?: (v: number) => string;
-  /** Data source. Defaults to 'hrrr'. */
-  source?: 'hrrr' | 'ofs';
+  /** Data source. Defaults to 'hrrr' (i.e. the selected deterministic model). */
+  source?: 'hrrr' | 'ofs' | 'gefs';
+  /** Deterministic models that publish this field. Defaults to all. */
+  models?: DeterministicModel[];
   /** OFS model identifier (e.g., 'sfbofs'). Only used when source === 'ofs'. */
   ofsModel?: string;
 }
@@ -141,12 +151,26 @@ export function displayUnit(v: CatalogVariable): string {
 
 // ---- shorthand level builder ------------------------------------------------
 
+// RRFS splits isobaric levels out of the 2D-field file into `prslev`.
+const rrfsProductFor = (label: string): RrfsProduct | undefined =>
+  label.endsWith('hPa') ? 'prslev' : undefined;
+
 function scalarLevel(label: string, parameter: RegExp, level: RegExp): VariableLevel {
-  return { label, query: { parameter, level } };
+  return { label, query: { parameter, level }, rrfsProduct: rrfsProductFor(label) };
 }
 
 function windLevel(label: string, uParam: RegExp, vParam: RegExp, level: RegExp): VariableLevel {
-  return { label, queryU: { parameter: uParam, level }, queryV: { parameter: vParam, level } };
+  return {
+    label,
+    queryU: { parameter: uParam, level },
+    queryV: { parameter: vParam, level },
+    rrfsProduct: rrfsProductFor(label),
+  };
+}
+
+/** True if `variable` can be loaded from deterministic `model`. */
+export function isAvailableFor(variable: CatalogVariable, model: DeterministicModel): boolean {
+  return !variable.models || variable.models.includes(model);
 }
 
 // ---- catalog ----------------------------------------------------------------
@@ -259,7 +283,7 @@ export const CATALOG: CatalogVariable[] = [
     levels: [scalarLevel('Entire atm', /^REFC$/, /entire atmosphere/)],
   },
   {
-    id: 'retop', group: 'Radar', label: 'Echo Top', kind: 'scalar',
+    id: 'retop', group: 'Radar', label: 'Echo Top', kind: 'scalar', models: ['hrrr'],
     colormap: 'viridis', range: [0, 20000], dimension: 'distance', format: fmtDistance,
     levels: [scalarLevel('Cloud top', /^RETOP$/, /^cloud top$/)],
   },
@@ -286,18 +310,42 @@ export const CATALOG: CatalogVariable[] = [
     id: 'lightning', group: 'Lightning', label: 'Lightning Threat', kind: 'scalar',
     colormap: 'lightning', range: [0, 10], dimension: 'none', unit: 'fl/hr',
     format: (v: number) => `${v.toFixed(1)} flashes/hr`,
-    levels: [scalarLevel('Entire Atm', /^LTNG$/, /^entire atmosphere$/)],
+    levels: [{
+      ...scalarLevel('Entire Atm', /^LTNG$/, /^entire atmosphere$/),
+      // RRFS publishes lightning as a max over the preceding hour ("5-6 hour max fcst").
+      rrfsQuery: {
+        parameter: /^LTNG$/, level: /^entire atmosphere$/,
+        forecast: (fh) => new RegExp(`^${fh - 1}-${fh} hour max fcst$`),
+      },
+    }],
   },
 
   // Other
   {
-    id: 'vvel', group: 'Other', label: 'Vertical Velocity', kind: 'scalar',
+    id: 'vvel', group: 'Other', label: 'Vertical Velocity', kind: 'scalar', models: ['hrrr'],
     colormap: 'turbo', range: [-10, 10], dimension: 'none', unit: 'Pa/s', format: fmtPas,
     levels: [
       scalarLevel('850 hPa', /^VVEL$/, /^850 mb$/),
       scalarLevel('700 hPa', /^VVEL$/, /^700 mb$/),
       scalarLevel('500 hPa', /^VVEL$/, /^500 mb$/),
     ],
+  },
+
+  // GEFS Ensemble
+  {
+    id: 'gefs-wind', group: 'GEFS Ensemble', label: 'GEFS Wind', kind: 'wind',
+    source: 'gefs', colormap: 'wind', range: [0, 60], dimension: 'speed',
+    format: fmtSpeed,
+    levels: [
+      windLevel('10m', /^UGRD$/, /^VGRD$/, /^10 m above ground$/),
+    ],
+  },
+  {
+    id: 'gefs-mslp', group: 'GEFS Ensemble', label: 'GEFS MSLP', kind: 'scalar',
+    source: 'gefs', colormap: 'mslp', range: [95000, 105000], dimension: 'none',
+    unit: 'hPa',
+    format: (v: number) => `${(v / 100).toFixed(1)} hPa`,
+    levels: [scalarLevel('MSL', /^PRMSL$/, /^mean sea level$/)],
   },
 
   // Ocean

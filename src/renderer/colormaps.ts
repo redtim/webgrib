@@ -12,7 +12,9 @@ export type ColormapName =
   | 'lightning'
   | 'ocean-currents'
   | 'water-level'
-  | 'bathymetry';
+  | 'bathymetry'
+  | 'mslp'
+  | 'spread';
 
 export function colormap(name: ColormapName): Uint8Array {
   switch (name) {
@@ -62,6 +64,12 @@ export function colormap(name: ColormapName): Uint8Array {
     case 'bathymetry': {
       const lut = buildFromPositionedStops(BATHYMETRY_STOPS);
       lut[3] = 0; // index 0 (zero depth / dry) = fully transparent
+      return lut;
+    }
+    case 'mslp': return buildFromStops(MSLP_STOPS);
+    case 'spread': {
+      const lut = buildFromStops(SPREAD_STOPS);
+      lut[3] = 0; // index 0 (zero spread) = fully transparent
       return lut;
     }
   }
@@ -252,4 +260,16 @@ const BATHYMETRY_STOPS: Array<{ t: number; rgb: [number, number, number] }> = [
   { t: 0.55,    rgb: [ 15,  40, 100] }, //  55 m
   { t: 0.75,    rgb: [ 10,  25,  75] }, //  75 m
   { t: 1.00,    rgb: [  5,  10,  40] }, // 100 m
+];
+// MSLP: blue (low pressure) → white (1013 hPa) → red (high pressure)
+const MSLP_STOPS: Array<[number, number, number]> = [
+  [30, 50, 160], [60, 100, 200], [100, 150, 230],
+  [160, 200, 240], [220, 230, 245], [245, 245, 245],
+  [245, 220, 210], [240, 170, 140], [220, 100, 80],
+  [180, 50, 40], [130, 20, 30],
+];
+// Spread (uncertainty): white/transparent → yellow → orange → red
+const SPREAD_STOPS: Array<[number, number, number]> = [
+  [240, 240, 240], [255, 255, 150], [255, 200, 60],
+  [240, 120, 30], [200, 40, 20], [140, 10, 30],
 ];
