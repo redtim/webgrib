@@ -34,6 +34,7 @@ import {
   LATLON_GLSL, computeLatLonUniforms, lonLatToGridUVLatLon, latLonBoundsToMercator,
   type LatLonBounds, type LatLonUniforms,
 } from '../projections/latlon.js';
+import { WATER_MASK_GLSL, WaterMask, WaterMaskGL } from './waterMask.js';
 
 const VS = /* glsl */ `#version 300 es
 in  vec2 aMercator;     // [0,1]² Web Mercator unit square
@@ -84,6 +85,7 @@ void main() {
 const FS_LATLON = /* glsl */ `#version 300 es
 precision highp float;
 ${LATLON_GLSL}
+${WATER_MASK_GLSL}
 
 uniform sampler2D uField;
 uniform sampler2D uLut;
@@ -108,10 +110,13 @@ void main() {
   float v = texture(uField, uv).r;
   if (isnan(v)) discard;
 
+  float mask = waterMaskAlpha();
+  if (mask <= 0.0) discard;
+
   float t = (v - uValueRange.x) / max(1e-8, uValueRange.y - uValueRange.x);
   t = clamp(t, 0.0, 1.0);
   vec4 lut = texture(uLut, vec2(t, 0.5));
-  outColor = vec4(lut.rgb, lut.a * uOpacity);
+  outColor = vec4(lut.rgb, lut.a * uOpacity * mask);
 }
 `;
 
@@ -151,6 +156,12 @@ export class ScalarFieldLayer implements CustomLayerInterface {
   private latLonU: LatLonUniforms | null = null;
   private latLonBounds: LatLonBounds | null = null;
   private projectionMode: 'lcc' | 'latlon' = 'lcc';
+
+  // Optional shoreline clip for lat/lon (OFS) fields. The GL resources are
+  // built lazily on first render and rebuilt if a different mask is set.
+  private waterMask: WaterMask | null = null;
+  private waterMaskGL: WaterMaskGL | null = null;
+  private waterMaskGLSource: WaterMask | null = null;
 
   // Retain the decoded field on the CPU so we can sample it in click
   // handlers without a GPU readback. ~8 MB for HRRR CONUS (1799×1059 × 4 B) —
@@ -333,6 +344,15 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     this.map?.triggerRepaint();
   }
 
+  /**
+   * Clip lat/lon fields to a shoreline polygon (null = no clipping). Only
+   * affects `setDataLatLon` fields; LCC (HRRR) fields are never masked.
+   */
+  setWaterMask(mask: WaterMask | null): void {
+    this.waterMask = mask;
+    this.map?.triggerRepaint();
+  }
+
   setColormap(name: ColormapName): void {
     this.cmapName = name;
     if (this.gl && this.lutTex) {
@@ -430,6 +450,26 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     if (useLatLon) {
       const u = this.latLonU!;
       gl.uniform4f(this.uloc(prog,'uLatLonBounds'), u.lonMin, u.lonMax, u.latMin, u.latMax);
+
+      // Shoreline clip: render the mask for this camera into an offscreen
+      // texture first, then bind it for the fragment shader. Doing it here
+      // (rather than before useProgram) keeps the mask pass fully
+      // self-contained; it restores program/VAO/FBO state itself.
+      let maskTex: WebGLTexture | null = null;
+      if (this.waterMask) {
+        if (!this.waterMaskGL || this.waterMaskGLSource !== this.waterMask) {
+          this.waterMaskGL?.dispose();
+          this.waterMaskGL = new WaterMaskGL(gl, this.waterMask);
+          this.waterMaskGLSource = this.waterMask;
+        }
+        maskTex = this.waterMaskGL.render(matrix);
+        gl.useProgram(prog);
+        gl.bindVertexArray(vao);
+      }
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, maskTex);
+      gl.uniform1i(this.uloc(prog,'uMask'), 2);
+      gl.uniform1i(this.uloc(prog,'uUseMask'), maskTex ? 1 : 0);
     } else {
       const u = this.lcc!;
       gl.uniform1f(this.uloc(prog,'uLccN'), u.n);
@@ -457,6 +497,8 @@ export class ScalarFieldLayer implements CustomLayerInterface {
     gl.useProgram(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, null);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, null);
     gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -464,6 +506,9 @@ export class ScalarFieldLayer implements CustomLayerInterface {
 
   onRemove(_map: MlMap, glAny: WebGL2RenderingContext | WebGLRenderingContext): void {
     const gl = glAny as WebGL2RenderingContext;
+    this.waterMaskGL?.dispose();
+    this.waterMaskGL = null;
+    this.waterMaskGLSource = null;
     if (this.fieldTex) gl.deleteTexture(this.fieldTex.tex);
     if (this.lutTex) gl.deleteTexture(this.lutTex.tex);
     if (this.vertexBuffer) gl.deleteBuffer(this.vertexBuffer);

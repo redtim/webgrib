@@ -45,6 +45,7 @@ import type { WindyComponent, WindyInstance } from './vendor/windy.js';
 import type { DecodedField, LambertConformalGrid } from '../../grib2/types.js';
 import { resampleLccToLatLon } from '../../grib2/resample.js';
 import { computeLccUniforms, lonLatToGridUV, type LccUniforms } from '../projections/lcc.js';
+import type { WaterMask } from './waterMask.js';
 
 export interface WindyLayerOptions {
   id?: string;
@@ -73,6 +74,26 @@ export interface WindyLayerOptions {
   frameRate?: number;
   /** Custom color palette. Array of CSS color strings, low-speed → high-speed. */
   colorScale?: string[];
+}
+
+/**
+ * Per-dataset overrides for how particles move and how long their trails
+ * linger. Applied on top of the constructor options at the next (re)start —
+ * e.g. ocean currents (~1 m/s) need a much larger velocityScale than
+ * wind (~10 m/s) to read as motion at all.
+ */
+export interface WindyMotionOptions {
+  /** Per-frame particle advance scalar (constructor default 0.005). */
+  velocityScale?: number;
+  /** Frames before a particle respawns (constructor default 90). */
+  particleAge?: number;
+  /**
+   * Trail persistence per frame, 0–1. Higher keeps old trail pixels around
+   * longer, so trails read as longer streaks. windy.js default 0.97.
+   */
+  trailPersistence?: number;
+  /** Animation frame rate (constructor default 15). */
+  frameRate?: number;
 }
 
 /** Matches the `sampleAt` return shape of the old WindParticleLayer so the
@@ -105,6 +126,15 @@ export class WindyLayer {
   private lcc: LccUniforms | null = null;
   private latLonBounds: { lonMin: number; lonMax: number; latMin: number; latMax: number } | null = null;
 
+  // Optional shoreline mask. Rasterized in screen space on every (re)start
+  // so particles never seed or step onto land; `screenMask` is one byte per
+  // canvas pixel (255 = water) for the current view, or null when the view
+  // doesn't touch the mask.
+  private waterMask: WaterMask | null = null;
+  private screenMask: Uint8Array | null = null;
+  private screenMaskW = 0;
+  private screenMaskH = 0;
+
   // Snapshot of user-provided options; we only read them when (re)starting.
   private readonly minVelocity: number;
   private readonly maxVelocityOverride: number | undefined;
@@ -114,6 +144,7 @@ export class WindyLayer {
   private readonly particleMultiplier: number;
   private readonly frameRate: number;
   private readonly colorScale: string[] | undefined;
+  private motion: WindyMotionOptions | null = null;
 
   constructor(opts: WindyLayerOptions = {}) {
     this.id = opts.id ?? 'gribwebview-wind';
@@ -242,18 +273,16 @@ export class WindyLayer {
     const dy = (bounds.latMax - bounds.latMin) / (ny - 1);
 
     // The data from OFS is typically S→N (lat increases with row index).
-    // windy.js expects N→S (scanMode 0), so we flip rows.
+    // windy.js expects N→S (scanMode 0), so we flip rows. NaN (land) cells
+    // are passed through — the engine treats them as missing, so particles
+    // there die and respawn rather than sitting still on zero velocity.
     const uFlipped = new Float32Array(u.length);
     const vFlipped = new Float32Array(v.length);
     for (let j = 0; j < ny; j++) {
       const srcRow = j * nx;
       const dstRow = (ny - 1 - j) * nx;
-      for (let i = 0; i < nx; i++) {
-        const uVal = u[srcRow + i]!;
-        const vVal = v[srcRow + i]!;
-        uFlipped[dstRow + i] = Number.isNaN(uVal) ? 0 : uVal;
-        vFlipped[dstRow + i] = Number.isNaN(vVal) ? 0 : vVal;
-      }
+      uFlipped.set(u.subarray(srcRow, srcRow + nx), dstRow);
+      vFlipped.set(v.subarray(srcRow, srcRow + nx), dstRow);
     }
 
     const baseHeader = {
@@ -280,6 +309,38 @@ export class WindyLayer {
     this.currentMaxSpeed = maxSpeed;
 
     if (this.map && this.visible) this.start();
+  }
+
+  /**
+   * Override particle motion/trail parameters for the current dataset
+   * (null = constructor defaults). Restarts the animation if running.
+   */
+  setMotion(motion: WindyMotionOptions | null): void {
+    const same = JSON.stringify(motion) === JSON.stringify(this.motion);
+    this.motion = motion;
+    if (!same && this.map && this.visible && this.currentData) this.start();
+  }
+
+  /**
+   * Clip particles to a shoreline polygon (null = no clipping). Takes effect
+   * on the next (re)start.
+   */
+  setWaterMask(mask: WaterMask | null): void {
+    if (this.waterMask === mask) return;
+    this.waterMask = mask;
+    this.screenMask = null;
+    if (this.map && this.visible && this.currentData) this.start();
+  }
+
+  /** True if a geographic point is on water per the current screen mask (or no mask is set). */
+  isWaterAt(lonDeg: number, latDeg: number): boolean {
+    if (!this.waterMask || !this.map) return true;
+    if (!this.screenMask) return true;
+    const p = this.map.project([lonDeg, latDeg]);
+    const x = Math.round(p.x);
+    const y = Math.round(p.y);
+    if (x < 0 || y < 0 || x >= this.screenMaskW || y >= this.screenMaskH) return true;
+    return this.screenMask[y * this.screenMaskW + x]! > 127;
   }
 
   /**
@@ -385,6 +446,29 @@ export class WindyLayer {
     // the actual observed max so the palette always spans the data.
     const maxV = this.maxVelocityOverride ?? (this.currentMaxSpeed > 0 ? this.currentMaxSpeed : 30);
 
+    // Rasterize the shoreline for this view. The canvas is CSS-pixel sized
+    // (see syncCanvasSize), matching map.project's coordinate space.
+    this.screenMask = null;
+    if (this.waterMask) {
+      this.screenMask = this.waterMask.rasterizeScreen(
+        (lon, lat) => { const p = map.project([lon, lat]); return [p.x, p.y]; },
+        width, height,
+        { west: mb.getWest(), south: mb.getSouth(), east: mb.getEast(), north: mb.getNorth() },
+        map.getZoom(),
+      );
+      this.screenMaskW = width;
+      this.screenMaskH = height;
+    }
+    const screenMask = this.screenMask;
+    const isWater = screenMask
+      ? (x: number, y: number): boolean => {
+          const xi = Math.round(x);
+          const yi = Math.round(y);
+          if (xi < 0 || yi < 0 || xi >= width || yi >= height) return false;
+          return screenMask[yi * width + xi]! > 127;
+        }
+      : undefined;
+
     this.windy = Windy({
       canvas: this.canvas,
       data: this.currentData,
@@ -399,15 +483,19 @@ export class WindyLayer {
         const p = map.project([lon, lat]);
         return [p.x, p.y];
       },
+      isWater,
       minVelocity: this.minVelocity,
       maxVelocity: maxV,
-      velocityScale: this.velocityScale,
-      particleAge: this.particleAge,
+      velocityScale: this.motion?.velocityScale ?? this.velocityScale,
+      particleAge: this.motion?.particleAge ?? this.particleAge,
       lineWidth: this.lineWidth,
       particleMultiplier: this.particleMultiplier,
-      frameRate: this.frameRate,
+      frameRate: this.motion?.frameRate ?? this.frameRate,
       colorScale: this.colorScale,
     });
+    if (this.motion?.trailPersistence !== undefined) {
+      this.windy.setOptions({ opacity: this.motion.trailPersistence });
+    }
 
     this.windy.start(bounds, width, height, extent);
   }

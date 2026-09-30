@@ -35,6 +35,11 @@ export interface WindyParams {
   invert: (x: number, y: number) => [number, number];
   /** (lat, lon) in degrees → pixel coord. */
   project: (lat: number, lon: number) => [number, number];
+  /**
+   * Optional screen-space mask: return false for canvas pixels where no
+   * particles may exist (land). Evaluated once per field build.
+   */
+  isWater?: (x: number, y: number) => boolean;
   minVelocity?: number;
   maxVelocity?: number;
   velocityScale?: number;

@@ -68,6 +68,7 @@ No server-side processing is required. All GRIB2 decoding, projection math, and 
 1. `sfbofs.ts` builds an OPeNDAP constraint expression requesting only surface-level u/v + coordinate arrays (~1.5 MB vs 68 MB full)
 2. `dap2.ts` parses the DAP2 binary response (DDS text header + XDR float payload)
 3. Data is passed to `ScalarFieldLayer.setDataLatLon()` (simpler lat/lon shader) and `WindyLayer.setWindLatLon()` (no LCC resampling needed)
+4. Both layers are clipped to a high-resolution shoreline polygon (`public/shoreline/sfbay-water.geojson`, see [Shoreline mask](#shoreline-mask-srcrendererlayerswatermaskts)). Before clipping, `fillMissingNearest()` grows the field a few cells into the model's land mask so the polygon, not the ~275 m model coast, decides the edge
 
 ---
 
@@ -104,6 +105,7 @@ gribwebview/
 │   │       └── png.ts                  Template 5.41: PNG lossless compression
 │   │
 │   ├── ofs/                            ── Ocean Forecast System data access ──
+│   │   ├── extrapolate.ts              Nearest-neighbour fill of NaN (land) cells before shoreline clipping
 │   │   ├── dap2.ts                     DAP2 binary (.dods) parser
 │   │   └── sfbofs.ts                   SFBOFS fetcher: OPeNDAP subsetting, cycle timing
 │   │
@@ -114,6 +116,7 @@ gribwebview/
 │   │   ├── layers/
 │   │   │   ├── scalarField.ts          WebGL2 CustomLayerInterface: field texture + shader
 │   │   │   ├── windyLayer.ts           Canvas overlay: vendored windy.js particle animation
+│   │   │   ├── waterMask.ts            3 m shoreline polygon: GL mask texture + screen-space raster
 │   │   │   ├── lightning.ts            Canvas overlay: real-time Blitzortung lightning strikes
 │   │   │   └── vendor/
 │   │   │       ├── windy.js            Vendored leaflet-velocity particle engine
@@ -334,6 +337,21 @@ A MapLibre GL `CustomLayerInterface` that renders decoded GRIB2 fields using Web
 
 Two shader programs are compiled: one with embedded LCC projection GLSL, one with lat/lon projection GLSL. The active program is selected based on the data source.
 
+#### Shoreline mask (`layers/waterMask.ts`)
+
+OFS regular-grid output carries the model's own land mask at ~275 m, which reads as a blocky coastline and, with linear texture filtering, erodes another half cell of water. `WaterMask` replaces it with a polygon of SF Bay water traced from NOAA NCEI's CUDEM 1/9 arc-second (~3 m) topobathy tiles.
+
+- **Build:** `scripts/build-shoreline.py` reads the 20 tiles that intersect the SFBOFS domain straight from the `noaa-nos-coastal-lidar-pds` S3 bucket (cloud-optimized GeoTIFFs, so only the needed byte ranges are fetched), thresholds bed elevation at 0 m NAVD88, removes pockets under 10 000 m², polygonizes, simplifies to 2 m, keeps the water body connected to the Golden Gate, and writes one GeoJSON MultiPolygon (~1 MB, ~150 KB gzipped). Where no tile exists (the Delta east of 121.75 W, open ocean west of 123.25 W) the domain is left unmasked so the model mask still applies there.
+- **Raster clip:** `WaterMaskGL` triangulates the polygon once (earcut) into float32 Mercator offsets from a float64 origin, folds the origin into the camera matrix on the CPU, and renders it each frame into an offscreen R8 texture the size of the drawing buffer. The lat/lon fragment shader multiplies alpha by a 3×3 box sample of that texture, giving an antialiased coastline that is exact at every zoom.
+- **Particle clip:** `WindyLayer` rasterizes the same polygon in screen space with Canvas 2D (via `map.project`) on every restart and hands `windy.js` an `isWater(x, y)` gate, so particles are never seeded or stepped onto land. Below zoom 13 a decimated copy of each ring is used to keep restarts cheap.
+
+Rebuild the polygon with:
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install rasterio shapely numpy
+.venv/bin/python scripts/build-shoreline.py
+```
+
 The layer retains the field data on the CPU (~8 MB for HRRR CONUS at 1799x1059) to support `sampleAt()` — bilinear interpolation at a geographic point for click-to-inspect popups without GPU readback.
 
 #### WindyLayer (`layers/windyLayer.ts`)
@@ -463,6 +481,7 @@ User preferences persist to `localStorage` and are reactive — changing a unit 
 | **HRRR** | `noaa-hrrr-bdp-pds.s3.amazonaws.com` | GRIB2 + .idx | Lambert Conformal Conic | 3 km, 1799x1059 | Temperature, wind, precipitation, reflectivity, CAPE, clouds, visibility, etc. |
 | **RRFS** | `nomads.ncep.noaa.gov/.../rrfs/para` (via proxy `/nomads/`) | GRIB2 + .idx (`2dfld` surface, `prslev` isobaric) | Lambert Conformal Conic (same grid as HRRR) | 3 km, 1799x1059, hourly to f084 at 00/06/12/18z | Same catalog as HRRR, except Echo Top and Vertical Velocity |
 | **SFBOFS** | `opendap.co-ops.nos.noaa.gov` (via CORS proxy) | DAP2 binary | Regular lat/lon | 329x553 | Ocean surface currents (u/v) |
+| **CUDEM** | `noaa-nos-coastal-lidar-pds.s3.amazonaws.com` (build time only) | Cloud-optimized GeoTIFF | Regular lat/lon | 1/9 arc-second (~3 m), 20 tiles | Topobathy elevation → shoreline polygon |
 | **Lightning** | `wss://ws1.blitzortung.org/` | LZW-compressed JSON | Point data | Real-time | Strike lat/lon/time/polarity |
 | **Basemap** | OpenFreeMap | Vector tiles | — | — | Dark style map tiles |
 

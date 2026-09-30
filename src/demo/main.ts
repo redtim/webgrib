@@ -17,6 +17,8 @@ import { CATALOG, findVariable, displayRange, displayUnit, isAvailableFor } from
 import type { CatalogVariable, VariableLevel, DeterministicModel, LayerQuery } from '../renderer/catalog.js';
 import { fetchSfbofsSurface, fetchSfbofsWaterLevel, latestCycle as sfbofsLatestCycle, SFBOFS_MAX_FHOUR } from '../ofs/sfbofs.js';
 import { computeWaterDepth } from '../bathymetry/waterDepth.js';
+import { fillMissingNearest } from '../ofs/extrapolate.js';
+import { WaterMask } from '../renderer/layers/waterMask.js';
 import { sampleHrrrAtLatLon, sampleLccScalarAtLatLon, sampleLccPoint } from '../grib2/resample.js';
 import type { DecodedField } from '../grib2/types.js';
 import type { LatLonBounds } from '../renderer/projections/latlon.js';
@@ -54,6 +56,43 @@ function ofsSchedule(validDate: Date): { cycle: number; date: string; fhour: num
 
 // Wind tick marks in m/s (native unit) — converted to display unit dynamically
 const WIND_TICK_MS = [0, 2.57, 5.14, 7.72, 10.29, 12.86, 15.43, 18.01]; // ~0,5,10,15,20,25,30,35 kt
+
+/**
+ * High-resolution SF Bay shoreline used to clip OFS layers (see
+ * scripts/build-shoreline.py). Loaded once on first use; a failed fetch
+ * degrades to the model's own ~275 m land mask.
+ */
+let waterMaskPromise: Promise<WaterMask | null> | null = null;
+function ensureWaterMask(): Promise<WaterMask | null> {
+  if (!waterMaskPromise) {
+    waterMaskPromise = WaterMask.load(`${import.meta.env.BASE_URL}shoreline/sfbay-water.geojson`)
+      .then((m) => { console.info(`water mask loaded: ${m.polygons.length} polygons, ${m.vertexCount} vertices`); return m; })
+      .catch((err: unknown) => { console.warn('water mask unavailable, using model land mask', err); return null; });
+  }
+  return waterMaskPromise;
+}
+
+/**
+ * Passes of nearest-neighbour extrapolation applied to OFS fields before a
+ * fine shoreline mask clips them. Four passes ≈ 1.1 km, comfortably past
+ * the gap between the model's coarse coast and the real one.
+ */
+const OFS_FILL_PASSES = 4;
+/** Same for the ~250 m bathymetry grid behind the water-depth layer (~500 m). */
+const DEPTH_FILL_PASSES = 2;
+
+/**
+ * Particle motion for ocean currents. Currents peak around 1.5 m/s versus
+ * ~20 m/s for wind, so with the shared default velocityScale they barely
+ * crawl. Push them harder and let trails linger so tidal flow reads as
+ * long streamlines.
+ */
+const CURRENT_PARTICLE_MOTION = {
+  velocityScale: 0.035,
+  particleAge: 240,
+  trailPersistence: 0.985,
+  frameRate: 24,
+} as const;
 
 /** Build wind legend args in the user's current speed unit. */
 function windLegendArgs(): [number, number, string, LegendTick[]] {
@@ -737,6 +776,13 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Everything below is on the HRRR/RRFS/GEFS grids — no shoreline clip.
+    // (OFS loads keep the mask in place across time changes so the previous
+    // frame never flashes unclipped while the next one is fetching.)
+    scalarLayer.setWaterMask(null);
+    windLayer.setWaterMask(null);
+    windLayer.setMotion(null);
+
     // Route GEFS variables to the GEFS loader
     if (variable.source === 'gefs') {
       try {
@@ -838,6 +884,14 @@ async function main(): Promise<void> {
   // ---- load OFS variable -----------------------------------------------------
 
   async function loadOfsLevel(variable: CatalogVariable, isStale: () => boolean): Promise<void> {
+    // Apply the shoreline clip before fetching so it's already in place
+    // (and stays in place) while the new time step loads. The promise is
+    // cached, so after the first load this resolves immediately.
+    const mask = await ensureWaterMask();
+    if (isStale()) return;
+    scalarLayer.setWaterMask(mask);
+    windLayer.setWaterMask(mask);
+
     if (variable.ofsModel === 'apparent-wind') {
       await loadApparentWind(variable, isStale);
       return;
@@ -859,8 +913,20 @@ async function main(): Promise<void> {
 
     const { cycle, date, fhour } = ofsSchedule(timeline.validDate());
 
-    const field = await fetchSfbofsSurface(cycle, date, fhour);
+    const [rawField, waterMask] = await Promise.all([fetchSfbofsSurface(cycle, date, fhour), ensureWaterMask()]);
     if (isStale()) return;
+
+    // With a fine shoreline available, grow the field into the model's land
+    // cells so the mask (not the coarse model coast) decides the edge.
+    const field = waterMask
+      ? {
+          ...rawField,
+          u: fillMissingNearest(rawField.u, rawField.nx, rawField.ny, OFS_FILL_PASSES),
+          v: fillMissingNearest(rawField.v, rawField.nx, rawField.ny, OFS_FILL_PASSES),
+        }
+      : rawField;
+    scalarLayer.setWaterMask(waterMask);
+    windLayer.setWaterMask(waterMask);
 
     // Compute speed magnitude for the scalar raster
     const speed = new Float32Array(field.u.length);
@@ -883,6 +949,7 @@ async function main(): Promise<void> {
     // Show current particles
     if (!windLayer.isAttached()) windLayer.attach(map);
     windLayer.setVisible(true);
+    windLayer.setMotion(CURRENT_PARTICLE_MOTION);
     windLayer.setWindLatLon(field.u, field.v, field.nx, field.ny, field.bounds);
 
     const range = variable.range ?? [sMin, sMax];
@@ -910,8 +977,13 @@ async function main(): Promise<void> {
 
     const { cycle, date, fhour } = ofsSchedule(timeline.validDate());
 
-    const field = await fetchSfbofsWaterLevel(cycle, date, fhour);
+    const [rawField, waterMask] = await Promise.all([fetchSfbofsWaterLevel(cycle, date, fhour), ensureWaterMask()]);
     if (isStale()) return;
+
+    const field = waterMask
+      ? { ...rawField, values: fillMissingNearest(rawField.values, rawField.nx, rawField.ny, OFS_FILL_PASSES) }
+      : rawField;
+    scalarLayer.setWaterMask(waterMask);
 
     let zMin = Infinity, zMax = -Infinity;
     for (let i = 0; i < field.values.length; i++) {
@@ -961,13 +1033,21 @@ async function main(): Promise<void> {
 
     const { cycle, date, fhour } = ofsSchedule(timeline.validDate());
 
-    const zeta = await fetchSfbofsWaterLevel(cycle, date, fhour);
+    const [zeta, waterMask] = await Promise.all([fetchSfbofsWaterLevel(cycle, date, fhour), ensureWaterMask()]);
     if (isStale()) return;
     const depth = await computeWaterDepth(zeta);
     if (isStale()) return;
 
+    // The bathymetry grid is ~250 m, so cells whose centre is on land are
+    // NaN even where part of the cell is water. With the 3 m shoreline doing
+    // the clipping, grow the field two cells so those partial cells fill in.
+    const values = waterMask
+      ? fillMissingNearest(depth.values, depth.nx, depth.ny, DEPTH_FILL_PASSES)
+      : depth.values;
+    scalarLayer.setWaterMask(waterMask);
+
     const scalarInput = {
-      values: depth.values,
+      values,
       nx: depth.nx, ny: depth.ny,
       min: depth.min,
       max: depth.max,
@@ -1011,15 +1091,26 @@ async function main(): Promise<void> {
     const fcRe = forecastQuery(timeline.fhour);
 
     // Fetch both in parallel
-    const [ofsField, hrrrWind] = await Promise.all([
+    const [rawOfs, hrrrWind, waterMask] = await Promise.all([
       fetchSfbofsSurface(ofsCycle, ofsDate, ofsFhour),
       client.decodePair(
         windIdxUrl,
         { parameter: /^UGRD$/, level: /^10 m above ground$/, forecast: fcRe },
         { parameter: /^VGRD$/, level: /^10 m above ground$/, forecast: fcRe },
       ),
+      ensureWaterMask(),
     ]);
     if (isStale()) return;
+
+    const ofsField = waterMask
+      ? {
+          ...rawOfs,
+          u: fillMissingNearest(rawOfs.u, rawOfs.nx, rawOfs.ny, OFS_FILL_PASSES),
+          v: fillMissingNearest(rawOfs.v, rawOfs.nx, rawOfs.ny, OFS_FILL_PASSES),
+        }
+      : rawOfs;
+    scalarLayer.setWaterMask(waterMask);
+    windLayer.setWaterMask(waterMask);
 
     // Resample model wind onto the OFS grid (true-north frame) — HRRR and RRFS share the LCC grid
     const hrrrOnOfs = sampleHrrrAtLatLon(
@@ -1071,6 +1162,7 @@ async function main(): Promise<void> {
     // Show apparent wind particles
     if (!windLayer.isAttached()) windLayer.attach(map);
     windLayer.setVisible(true);
+    windLayer.setMotion(null);
     windLayer.setWindLatLon(apparentU, apparentV, ofsField.nx, ofsField.ny, ofsField.bounds);
 
     legend.update('wind', ...windLegendArgs());
@@ -1484,12 +1576,14 @@ async function main(): Promise<void> {
   /** Scalar fill value at a point, or null where the fill has no data. */
   const sampleFill = (lng: number, lat: number): ReturnType<typeof scalarLayer.sampleAt> => {
     if (!map.getLayer('hrrr-scalar') || !scalarLayer.isVisible()) return null;
+    if (!windLayer.isWaterAt(lng, lat)) return null;
     const s = scalarLayer.sampleAt(lng, lat);
     return s && !Number.isNaN(s.value) ? s : null;
   };
 
   const sampleWind = (lng: number, lat: number): ReturnType<typeof windLayer.sampleAt> => {
     if (!windLayer.isAttached() || !windLayer.isVisible()) return null;
+    if (!windLayer.isWaterAt(lng, lat)) return null;
     const w = windLayer.sampleAt(lng, lat);
     return w && Number.isFinite(w.speed) ? w : null;
   };
