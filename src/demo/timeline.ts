@@ -2,21 +2,32 @@
  * Forecast timeline control. Shows a cycle selector and a horizontal bar of
  * forecast-hour ticks grouped by day with labels and dividers, plus play and
  * "Now" buttons. Easy mode hides the model/cycle selectors via CSS.
+ *
+ * Each tick is a slot: a forecast hour of a specific cycle. The default
+ * "Latest" run blends cycles so the bar covers every hour on offer, rather
+ * than stopping at the 18 h that most hourly cycles run to.
  */
+
+import {
+  blendedSlots, cycleSlots, deterministicSlots, maxForecastHour, nearestSlotIndex, recentCycles,
+  formatCycle,
+} from './timelineSlots.js';
+import type { DeterministicModel, TimelineSlot } from './timelineSlots.js';
+
+export type { DeterministicModel, TimelineSlot };
 
 export interface TimelineOptions {
   parent: HTMLElement;
   /** May return a promise for the resulting load; playback waits on it. */
   onChange: (cycle: string, fhour: number) => void | Promise<void>;
   /**
-   * Optional availability check for a deterministic model cycle. Cycles that
-   * resolve false are disabled in the dropdown, and if the selected cycle is
-   * missing the timeline moves to the newest one that exists.
+   * Optional availability check for a forecast hour of a deterministic model
+   * cycle. Each listed cycle is probed at its last hour, so only fully
+   * published cycles are used; the rest are disabled in the dropdown.
    */
-  probeCycle?: (model: DeterministicModel, cycle: string) => Promise<boolean>;
+  probeCycle?: (model: DeterministicModel, cycle: string, fhour: number) => Promise<boolean>;
 }
 
-export type DeterministicModel = 'hrrr' | 'rrfs';
 export type TimelineSource = DeterministicModel | 'gefs';
 
 const MODEL_LABELS: Record<DeterministicModel, string> = { hrrr: 'HRRR', rrfs: 'RRFS' };
@@ -27,6 +38,9 @@ const MODEL_HINTS: Record<DeterministicModel, string> = {
 
 /** Pause on each frame during playback, after its data has loaded. */
 const PLAY_DWELL_MS = 800;
+
+/** Dropdown value for the blended run. */
+const LATEST = 'latest';
 
 export class Timeline {
   private cycleSelect: HTMLSelectElement;
@@ -39,9 +53,14 @@ export class Timeline {
   private playBtn: HTMLButtonElement;
   private playing = false;
   private pending: Promise<void> = Promise.resolve();
-  private _cycle = '';
-  private _fhour = 0;
-  private _maxHour = 18;
+  /** Selected run: a cycle, or LATEST for the blend of available cycles. */
+  private _run = LATEST;
+  /** Cycles on offer, newest first. */
+  private _cycles: string[] = [];
+  /** Cycles confirmed published, or null until the probe reports. */
+  private _available: Set<string> | null = null;
+  private _slots: TimelineSlot[] = [];
+  private _index = 0;
   private _source: TimelineSource = 'hrrr';
   private _model: DeterministicModel = 'hrrr';
   private _gefsFhours: number[] | null = null;
@@ -49,8 +68,8 @@ export class Timeline {
   private probeCycle: TimelineOptions['probeCycle'];
   private probeGen = 0;
 
-  get cycle(): string { return this._cycle; }
-  get fhour(): number { return this._fhour; }
+  get cycle(): string { return this._slots[this._index]?.cycle ?? ''; }
+  get fhour(): number { return this._slots[this._index]?.fhour ?? 0; }
   /** The deterministic model in use (kept while GEFS is showing). */
   get model(): DeterministicModel { return this._model; }
 
@@ -135,20 +154,23 @@ export class Timeline {
 
     this.populateCycles();
     this.cycleSelect.addEventListener('change', () => {
-      this.switchCyclePreservingValid(this.cycleSelect.value);
+      this._run = this.cycleSelect.value;
+      this.rebuild(this.validDate().getTime());
     });
 
-    this.rebuildTicks();
-    this.selectHour(0);
+    this.rebuildSlots();
+    this.selectIndex(0);
     this.probeCycles();
   }
 
   /**
-   * Switch the timeline between deterministic (HRRR/RRFS) and GEFS modes.
-   * Passing a deterministic source also makes it the current model.
+   * Switch the timeline between deterministic (HRRR/RRFS) and GEFS modes,
+   * keeping the valid time where the new source reaches it. Passing a
+   * deterministic source also makes it the current model.
    */
   setSource(source: TimelineSource, gefsFhours?: number[]): void {
     if (source === this._source) return;
+    const prevValidMs = this.validDate().getTime();
     this._source = source;
     this._gefsFhours = source === 'gefs' && gefsFhours ? gefsFhours : null;
     if (source !== 'gefs') {
@@ -159,8 +181,7 @@ export class Timeline {
     this.updateModelChips();
 
     this.populateCycles();
-    this.rebuildTicks();
-    this.selectHour(0);
+    this.rebuild(prevValidMs, true);
     this.probeCycles();
   }
 
@@ -178,11 +199,18 @@ export class Timeline {
     const prevValidMs = this.validDate().getTime();
     this._source = model;
     this.populateCycles();
-    this.switchCycleToValid(this._cycle, prevValidMs);
+    this.rebuild(prevValidMs, true);
     this.probeCycles();
   }
 
   get source(): TimelineSource { return this._source; }
+
+  /** Identifies the set of slots on offer; changes whenever they do. */
+  get slotsKey(): string {
+    const first = this._slots[0];
+    const last = this._slots[this._slots.length - 1];
+    return `${this._source}:${first?.cycle}:${last?.cycle}:${this._slots.length}`;
+  }
 
   private updateModelChips(): void {
     for (const [m, chip] of this.modelChips) {
@@ -192,79 +220,102 @@ export class Timeline {
   }
 
   private populateCycles(): void {
-    const cycles = this._source === 'gefs'
+    this._cycles = this._source === 'gefs'
       ? gefsRecentCyclesLocal(4)
       // The RRFS parallel feed occasionally skips cycles, so offer a few more.
-      : recentCycles(this._source === 'rrfs' ? 8 : 6);
+      : recentCycles(this._source === 'rrfs' ? 8 : 6, Date.now());
+    this._available = null;
     this.cycleSelect.innerHTML = '';
-    for (const c of cycles) {
+    if (this._source !== 'gefs') {
+      const opt = document.createElement('option');
+      opt.value = LATEST;
+      opt.textContent = 'Latest';
+      opt.title = 'Newest data for every hour, blending runs to reach the full forecast range';
+      this.cycleSelect.appendChild(opt);
+    }
+    for (const c of this._cycles) {
       const opt = document.createElement('option');
       opt.value = c;
       opt.textContent = `${c.slice(0, 4)}-${c.slice(4, 6)}-${c.slice(6, 8)} ${c.slice(8, 10)}Z`;
       this.cycleSelect.appendChild(opt);
     }
-    this._cycle = cycles[0] ?? '';
-  }
-
-  /** Preserve the same valid (calendar) time when switching cycles. */
-  private switchCyclePreservingValid(cycle: string): void {
-    this.switchCycleToValid(cycle, this.validDate().getTime());
-  }
-
-  private switchCycleToValid(cycle: string, validMs: number): void {
-    this._cycle = cycle;
-    this.cycleSelect.value = cycle;
-    this.rebuildTicks();
-    const newCycleMs = parseCycleUTC(this._cycle).getTime();
-    const desiredFhour = Math.round((validMs - newCycleMs) / 3600000);
-    const clamped = Math.max(0, Math.min(this._maxHour, desiredFhour));
-    this.selectHour(clamped);
+    this._run = this._source === 'gefs' ? this._cycles[0] ?? '' : LATEST;
+    this.cycleSelect.value = this._run;
   }
 
   /**
-   * Check which listed cycles actually exist, disabling missing ones. If the
-   * selected cycle is missing, move to the newest available cycle.
+   * Check which listed cycles are fully published, disabling the rest. The
+   * blended run is rebuilt from the confirmed cycles, and a selected cycle
+   * that is missing gives way to it.
    */
   private probeCycles(): void {
     if (!this.probeCycle || this._source === 'gefs') return;
     const gen = ++this.probeGen;
     const model = this._source;
-    const options = [...this.cycleSelect.options];
-    void Promise.all(options.map((o) => this.probeCycle!(model, o.value).catch(() => false)))
+    const cycles = this._cycles;
+    void Promise.all(cycles.map((c) => this.probeCycle!(model, c, maxForecastHour(model, c)).catch(() => false)))
       .then((results) => {
         if (gen !== this.probeGen) return;
-        options.forEach((o, i) => {
-          o.disabled = !results[i];
-          if (!results[i]) o.textContent += ' (unavailable)';
-        });
-        const current = options.find((o) => o.value === this._cycle);
-        if (current?.disabled) {
-          const firstOk = options.find((o) => !o.disabled);
-          if (firstOk) this.switchCyclePreservingValid(firstOk.value);
+        const available = new Set(cycles.filter((_, i) => results[i]));
+        // Nothing reachable says more about the network than the cycles.
+        if (available.size === 0) return;
+        this._available = available;
+        for (const o of this.cycleSelect.options) {
+          if (o.value === LATEST || available.has(o.value)) continue;
+          o.disabled = true;
+          o.textContent += ' (unavailable)';
         }
+        if (this._run !== LATEST && !available.has(this._run)) {
+          this._run = LATEST;
+          this.cycleSelect.value = LATEST;
+        }
+        this.rebuild(this.validDate().getTime());
       });
   }
 
-  private rebuildTicks(): void {
+  private rebuildSlots(): void {
     if (this._source === 'gefs') {
-      this.rebuildGefsMode();
-      return;
+      this._slots = cycleSlots(this._run, this._gefsFhours ?? []);
+    } else if (this._run === LATEST) {
+      const cycles = this._cycles.filter((c) => this._available?.has(c) ?? true);
+      this._slots = blendedSlots(this._source, cycles);
+    } else {
+      this._slots = deterministicSlots(this._source, this._run);
     }
-    const cycleHH = Number(this._cycle.slice(8, 10));
-    const longRange = this._source === 'rrfs' ? 84 : 48;
-    this._maxHour = cycleHH % 6 === 0 ? longRange : 18;
+    this.renderTicks();
+  }
+
+  /**
+   * Rebuild the slots and reselect the one nearest `validMs`. Reloads only if
+   * that lands on a different cycle or hour, unless `force` is set.
+   */
+  private rebuild(validMs: number, force = false): void {
+    const prevCycle = this.cycle;
+    const prevFhour = this.fhour;
+    this.rebuildSlots();
+    const index = nearestSlotIndex(this._slots, validMs);
+    const slot = this._slots[index];
+    if (force || slot?.cycle !== prevCycle || slot?.fhour !== prevFhour) {
+      this.selectIndex(index);
+    } else {
+      this._index = index;
+      this.markActive();
+    }
+  }
+
+  private renderTicks(): void {
     this.tickContainer.innerHTML = '';
     this.dayRow.innerHTML = '';
-
-    const cycleMs = parseCycleUTC(this._cycle).getTime();
 
     // Group hours by local day for day labels
     interface DayGroup { label: string; count: number }
     const groups: DayGroup[] = [];
     let prevDayKey = '';
+    const blended = new Set(this._slots.map((s) => s.cycle)).size > 1;
 
-    for (let h = 0; h <= this._maxHour; h++) {
-      const valid = new Date(cycleMs + h * 3600000);
+    this._slots.forEach((slot, index) => {
+      const h = slot.fhour;
+      const valid = new Date(slot.validMs);
       const dayKey = `${valid.getDay()}-${valid.getDate()}`;
       const hr = valid.getHours();
       const ampm = hr >= 12 ? 'p' : 'a';
@@ -273,9 +324,16 @@ export class Timeline {
       const tick = document.createElement('button');
       tick.className = 'timeline-tick';
       tick.dataset.hour = String(h);
-      tick.textContent = `${h12}${ampm}`;
-      tick.title = `t:${h} ${DAYS[valid.getDay()]!} ${h12}${ampm === 'p' ? 'pm' : 'am'}`;
-      tick.addEventListener('click', () => this.selectHour(h));
+      const when = `${DAYS[valid.getDay()]!} ${h12}${ampm === 'p' ? 'pm' : 'am'}`;
+      if (this._source === 'gefs') {
+        // For long-range forecasts show day+hour for clarity
+        tick.textContent = h <= 48 ? `${h12}${ampm}` : `d${Math.floor(h / 24)}`;
+        tick.title = `f${String(h).padStart(3, '0')} ${when}`;
+      } else {
+        tick.textContent = `${h12}${ampm}`;
+        tick.title = blended ? `t:${h} ${when} (${slot.cycle.slice(8, 10)}Z run)` : `t:${h} ${when}`;
+      }
+      tick.addEventListener('click', () => this.selectIndex(index));
       this.tickContainer.appendChild(tick);
 
       if (dayKey !== prevDayKey) {
@@ -284,7 +342,7 @@ export class Timeline {
       } else {
         groups[groups.length - 1]!.count++;
       }
-    }
+    });
 
     for (const g of groups) {
       const label = document.createElement('span');
@@ -295,61 +353,25 @@ export class Timeline {
     }
   }
 
-  private rebuildGefsMode(): void {
-    const fhours = this._gefsFhours ?? [];
-    this._maxHour = fhours.length > 0 ? fhours[fhours.length - 1]! : 384;
-    this.tickContainer.innerHTML = '';
-    this.dayRow.innerHTML = '';
-
-    const cycleMs = parseCycleUTC(this._cycle).getTime();
-
-    interface DayGroup { label: string; count: number }
-    const groups: DayGroup[] = [];
-    let prevDayKey = '';
-
-    for (const h of fhours) {
-      const valid = new Date(cycleMs + h * 3600000);
-      const dayKey = `${valid.getDay()}-${valid.getDate()}`;
-      const hr = valid.getHours();
-      const ampm = hr >= 12 ? 'p' : 'a';
-      const h12 = hr === 0 ? 12 : hr > 12 ? hr - 12 : hr;
-
-      const tick = document.createElement('button');
-      tick.className = 'timeline-tick';
-      tick.dataset.hour = String(h);
-      // For long-range forecasts show day+hour for clarity
-      tick.textContent = h <= 48 ? `${h12}${ampm}` : `d${Math.floor(h / 24)}`;
-      tick.title = `f${String(h).padStart(3, '0')} ${DAYS[valid.getDay()]!} ${h12}${ampm === 'p' ? 'pm' : 'am'}`;
-      tick.addEventListener('click', () => this.selectHour(h));
-      this.tickContainer.appendChild(tick);
-
-      if (dayKey !== prevDayKey) {
-        groups.push({ label: `${DAYS[valid.getDay()]!} ${valid.getMonth() + 1}/${valid.getDate()}`, count: 1 });
-        prevDayKey = dayKey;
-      } else {
-        groups[groups.length - 1]!.count++;
-      }
-    }
-
-    for (const g of groups) {
-      const label = document.createElement('span');
-      label.className = 'timeline-day-label';
-      label.textContent = g.label;
-      label.style.flex = String(g.count);
-      this.dayRow.appendChild(label);
-    }
-  }
-
-  selectHour(h: number): void {
-    this._fhour = h;
-    for (const el of this.tickContainer.children) {
-      const tickEl = el as HTMLElement;
-      const isActive = el.getAttribute('data-hour') === String(h);
-      tickEl.classList.toggle('active', isActive);
-      if (isActive) tickEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    }
+  private markActive(): void {
+    [...this.tickContainer.children].forEach((el, i) => {
+      const isActive = i === this._index;
+      el.classList.toggle('active', isActive);
+      if (isActive) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    });
     this.updateValidLabel();
-    this.pending = Promise.resolve(this.onChange(this._cycle, this._fhour)).catch(() => {});
+  }
+
+  private selectIndex(index: number): void {
+    this._index = index;
+    this.markActive();
+    this.pending = Promise.resolve(this.onChange(this.cycle, this.fhour)).catch(() => {});
+  }
+
+  /** Select a forecast hour on offer; hours are unique across blended runs. */
+  selectHour(h: number): void {
+    const index = this._slots.findIndex((s) => s.fhour === h);
+    if (index >= 0) this.selectIndex(index);
   }
 
   /** Select the forecast hour closest to the current wall-clock time. */
@@ -357,21 +379,16 @@ export class Timeline {
     this.selectValidTime(Date.now());
   }
 
-  /** True if `validMs` falls within the current cycle's forecast range. */
+  /** True if `validMs` falls within the timeline's forecast range. */
   covers(validMs: number): boolean {
-    const h = (validMs - parseCycleUTC(this._cycle).getTime()) / 3600000;
-    return h >= 0 && h <= this._maxHour;
+    const first = this._slots[0];
+    const last = this._slots[this._slots.length - 1];
+    return !!first && !!last && validMs >= first.validMs && validMs <= last.validMs;
   }
 
   /** Select the forecast hour whose valid time is closest to `validMs`. */
   selectValidTime(validMs: number): void {
-    const hours = this.hours();
-    const want = (validMs - parseCycleUTC(this._cycle).getTime()) / 3600000;
-    let best = hours[0] ?? 0;
-    for (const h of hours) {
-      if (Math.abs(h - want) < Math.abs(best - want)) best = h;
-    }
-    this.selectHour(best);
+    this.selectIndex(nearestSlotIndex(this._slots, validMs));
   }
 
   /** Start or stop looping playback through the forecast hours. */
@@ -387,41 +404,30 @@ export class Timeline {
       await this.pending;
       await new Promise((r) => setTimeout(r, PLAY_DWELL_MS));
       if (!this.playing) return;
-      const hours = this.hours();
-      const next = hours[(hours.indexOf(this._fhour) + 1) % hours.length];
-      if (next === undefined) return;
-      this.selectHour(next);
+      if (this._slots.length === 0) return;
+      this.selectIndex((this._index + 1) % this._slots.length);
     }
   }
 
   private updatePlayBtn(): void {
-    this.playBtn.textContent = this.playing ? '\u23F8' : '\u25B6';
+    this.playBtn.textContent = this.playing ? '⏸' : '▶';
     this.playBtn.title = this.playing ? 'Pause' : 'Play forecast';
   }
 
-  /** Selectable forecast hours for the current source, ascending. */
-  hours(): number[] {
-    if (this._source === 'gefs' && this._gefsFhours) return this._gefsFhours;
-    return Array.from({ length: this._maxHour + 1 }, (_, h) => h);
+  /** Selectable slots for the current source, in valid-time order. */
+  slots(): readonly TimelineSlot[] {
+    return this._slots;
   }
 
-  /** Step forward or backward. For GEFS, steps to next/prev valid forecast hour. */
+  /** Step forward or backward through the slots on offer. */
   stepHour(delta: number): void {
-    if (this._source === 'gefs' && this._gefsFhours) {
-      const fh = this._gefsFhours;
-      const curIdx = fh.indexOf(this._fhour);
-      const nextIdx = Math.max(0, Math.min(fh.length - 1, (curIdx >= 0 ? curIdx : 0) + delta));
-      const next = fh[nextIdx]!;
-      if (next !== this._fhour) this.selectHour(next);
-    } else {
-      const next = Math.max(0, Math.min(this._maxHour, this._fhour + delta));
-      if (next !== this._fhour) this.selectHour(next);
-    }
+    const next = Math.max(0, Math.min(this._slots.length - 1, this._index + delta));
+    if (next !== this._index) this.selectIndex(next);
   }
 
-  /** Compute the valid Date from cycle + fhour. */
+  /** The selected slot's valid time. */
   validDate(): Date {
-    return new Date(parseCycleUTC(this._cycle).getTime() + this._fhour * 3600000);
+    return new Date(this._slots[this._index]?.validMs ?? Date.now());
   }
 
   private updateValidLabel(): void {
@@ -438,41 +444,13 @@ export class Timeline {
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-function parseCycleUTC(cycle: string): Date {
-  return new Date(Date.UTC(
-    Number(cycle.slice(0, 4)),
-    Number(cycle.slice(4, 6)) - 1,
-    Number(cycle.slice(6, 8)),
-    Number(cycle.slice(8, 10)),
-  ));
-}
-
-function recentCycles(count: number): string[] {
-  const now = new Date(Date.now() - 3 * 3600 * 1000);
-  const cycles: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const d = new Date(now.getTime() - i * 3600 * 1000);
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(d.getUTCDate()).padStart(2, '0');
-    const h = String(d.getUTCHours()).padStart(2, '0');
-    cycles.push(`${y}${m}${day}${h}`);
-  }
-  return cycles;
-}
-
 function gefsRecentCyclesLocal(count: number): string[] {
   const now = new Date(Date.now() - 7 * 3600 * 1000); // ~7h production delay
   const cycleHour = Math.floor(now.getUTCHours() / 6) * 6;
   const base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), cycleHour));
   const cycles: string[] = [];
   for (let i = 0; i < count; i++) {
-    const d = new Date(base.getTime() - i * 6 * 3600 * 1000);
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(d.getUTCDate()).padStart(2, '0');
-    const h = String(d.getUTCHours()).padStart(2, '0');
-    cycles.push(`${y}${m}${day}${h}`);
+    cycles.push(formatCycle(new Date(base.getTime() - i * 6 * 3600 * 1000)));
   }
   return cycles;
 }

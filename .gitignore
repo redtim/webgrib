@@ -11,3 +11,4 @@ src/**/*.js
 coverage
 test/fixtures/*.grib2
 test/fixtures/*.idx
+.wrangler

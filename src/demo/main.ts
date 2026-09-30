@@ -10,7 +10,7 @@
 
 import maplibregl from 'maplibre-gl';
 import { ScalarFieldLayer, WindyLayer, LightningLayer, IsobarLayer } from '../renderer/index.js';
-import { hrrrUrls, rrfsUrls, forecastQuery, gefsUrls, gefsStatsUrls, GEFS_FHOURS } from '../grib2/idx.js';
+import { politeFetch, hrrrUrls, rrfsUrls, forecastQuery, gefsUrls, gefsStatsUrls, GEFS_FHOURS } from '../grib2/idx.js';
 import type { LatLonGrid, GridDefinition, LambertConformalGrid } from '../grib2/types.js';
 import { DecodeClient } from '../worker/client.js';
 import { CATALOG, findVariable, displayRange, displayUnit, isAvailableFor } from '../renderer/catalog.js';
@@ -84,12 +84,12 @@ function scalarQueryFor(model: DeterministicModel, level: VariableLevel): LayerQ
 }
 
 /**
- * Cheap existence check for a model cycle: a 1-byte ranged GET of its f000
- * .idx (the HRRR bucket's CORS policy rejects HEAD).
+ * Cheap existence check for a forecast hour of a model cycle: a 1-byte ranged
+ * GET of its .idx (the HRRR bucket's CORS policy rejects HEAD).
  */
-async function cycleExists(model: DeterministicModel, cycle: string): Promise<boolean> {
+async function cycleExists(model: DeterministicModel, cycle: string, fhour: number): Promise<boolean> {
   // no-store: a cached non-CORS response for the same URL would fail the CORS check.
-  const res = await fetch(deterministicIdxUrl(model, cycle, 0), { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+  const res = await politeFetch(deterministicIdxUrl(model, cycle, fhour), { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
   void res.body?.cancel();
   return res.ok;
 }
@@ -1340,7 +1340,7 @@ async function main(): Promise<void> {
 
   /** Everything the forecast rows depend on, other than the selected hour. */
   const forecastSignature = (): string => [
-    currentVariable?.id, levelSlider.index, timeline.source, timeline.model, timeline.cycle,
+    currentVariable?.id, levelSlider.index, timeline.source, timeline.model, timeline.slotsKey,
     particlesEnabled, isobarsEnabled,
   ].join('|');
 
@@ -1353,7 +1353,7 @@ async function main(): Promise<void> {
 
   interface ForecastRow {
     label: string;
-    idxUrl: (fhour: number) => string;
+    idxUrl: (cycle: string, fhour: number) => string;
     /** Null where the layer has no record for that hour. */
     queries: (fhour: number) => IdxQuery[] | null;
     cell: (values: number[], convergence: number) => ForecastCell | null;
@@ -1361,10 +1361,9 @@ async function main(): Promise<void> {
 
   function windForecastRow(label: string, u: LayerQuery, v: LayerQuery, level?: VariableLevel): ForecastRow {
     const model = timeline.model;
-    const cycle = timeline.cycle;
     return {
       label,
-      idxUrl: (fhour) => deterministicIdxUrl(model, cycle, fhour, level),
+      idxUrl: (cycle, fhour) => deterministicIdxUrl(model, cycle, fhour, level),
       queries: (fhour) => [
         { parameter: u.parameter, level: u.level, forecast: forecastQuery(fhour) },
         { parameter: v.parameter, level: v.level, forecast: forecastQuery(fhour) },
@@ -1388,7 +1387,6 @@ async function main(): Promise<void> {
     const rows: ForecastRow[] = [];
     if (timeline.source === 'gefs') return rows;
     const model = timeline.model;
-    const cycle = timeline.cycle;
     const variable = currentVariable;
     const level = variable?.levels[levelSlider.index];
     const name = variable ? (getUiMode() === 'easy' ? easyLabel(variable) : variable.label) : '';
@@ -1400,7 +1398,7 @@ async function main(): Promise<void> {
       } else if (variable.kind === 'scalar' && query) {
         rows.push({
           label: name,
-          idxUrl: (fhour) => deterministicIdxUrl(model, cycle, fhour, level),
+          idxUrl: (cycle, fhour) => deterministicIdxUrl(model, cycle, fhour, level),
           // Accumulated / windowed fields have no record at the analysis hour.
           queries: (fhour) => (query.forecast && fhour === 0 ? null : [{
             parameter: query.parameter,
@@ -1425,7 +1423,7 @@ async function main(): Promise<void> {
     if (isobarsEnabled) {
       rows.push({
         label: 'Pressure',
-        idxUrl: (fhour) => deterministicIdxUrl(model, cycle, fhour),
+        idxUrl: (cycle, fhour) => deterministicIdxUrl(model, cycle, fhour),
         queries: (fhour) => [{
           parameter: /^(MSLMA|MSLET|PRMSL)$/, level: /^mean sea level$/, forecast: forecastQuery(fhour),
         }],
@@ -1449,25 +1447,27 @@ async function main(): Promise<void> {
       return;
     }
 
-    const cycleMs = timeline.validDate().getTime() - timeline.fhour * 3600000;
-    const hours = timeline.hours();
+    // RRFS comes from rate-limited NOMADS, so thin its long range to 3-hourly.
+    const slots = timeline.model === 'rrfs'
+      ? timeline.slots().filter((s, i) => i <= 18 || s.fhour % 3 === 0)
+      : timeline.slots();
     forecastStrip.open(
       title,
-      hours.map((fhour) => ({ fhour, valid: new Date(cycleMs + fhour * 3600000) })),
+      slots.map(({ fhour, validMs }) => ({ fhour, valid: new Date(validMs) })),
       rows.map((r) => r.label),
     );
     forecastStrip.setActiveHour(timeline.fhour);
 
-    const tasks = hours.flatMap((fhour) => rows.map((row, rowIndex) => ({ fhour, row, rowIndex })));
+    const tasks = slots.flatMap(({ cycle, fhour }) => rows.map((row, rowIndex) => ({ cycle, fhour, row, rowIndex })));
     let next = 0;
     const worker = async (): Promise<void> => {
       while (next < tasks.length && gen === forecastGen) {
-        const { fhour, row, rowIndex } = tasks[next++]!;
+        const { cycle, fhour, row, rowIndex } = tasks[next++]!;
         const queries = row.queries(fhour);
         let cell: ForecastCell | null = null;
         if (queries) {
           try {
-            const s = await client.samplePoint(row.idxUrl(fhour), queries, lng, lat);
+            const s = await client.samplePoint(row.idxUrl(cycle, fhour), queries, lng, lat);
             cell = row.cell(s.values, s.convergence);
           } catch (err) {
             console.warn(`Point forecast: ${row.label} f${fhour} failed:`, err);

@@ -4,3 +4,8 @@ compatibility_date = "2024-01-01"
 
 # Free tier — no paid plan needed
 # usage_model = "bundled"
+
+# NOMADS response cache — see cachedFetch in ofs-proxy.js.
+[[r2_buckets]]
+binding = "CACHE"
+bucket_name = "ofs-proxy-cache"
