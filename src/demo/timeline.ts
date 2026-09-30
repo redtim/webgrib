@@ -1,11 +1,13 @@
 /**
  * Forecast timeline control. Shows a cycle selector and a horizontal bar of
- * forecast-hour ticks grouped by day with labels and dividers.
+ * forecast-hour ticks grouped by day with labels and dividers, plus play and
+ * "Now" buttons. Easy mode hides the model/cycle selectors via CSS.
  */
 
 export interface TimelineOptions {
   parent: HTMLElement;
-  onChange: (cycle: string, fhour: number) => void;
+  /** May return a promise for the resulting load; playback waits on it. */
+  onChange: (cycle: string, fhour: number) => void | Promise<void>;
   /**
    * Optional availability check for a deterministic model cycle. Cycles that
    * resolve false are disabled in the dropdown, and if the selected cycle is
@@ -18,20 +20,32 @@ export type DeterministicModel = 'hrrr' | 'rrfs';
 export type TimelineSource = DeterministicModel | 'gefs';
 
 const MODEL_LABELS: Record<DeterministicModel, string> = { hrrr: 'HRRR', rrfs: 'RRFS' };
+const MODEL_HINTS: Record<DeterministicModel, string> = {
+  hrrr: 'High-Resolution Rapid Refresh: 3 km, up to 48 hours',
+  rrfs: 'Rapid Refresh Forecast System: 3 km, up to 84 hours',
+};
+
+/** Pause on each frame during playback, after its data has loaded. */
+const PLAY_DWELL_MS = 800;
 
 export class Timeline {
   private cycleSelect: HTMLSelectElement;
   private modelSelect: HTMLSelectElement;
+  /** Easy-mode stand-in for modelSelect: one chip per model. */
+  private modelChips = new Map<DeterministicModel, HTMLButtonElement>();
   private dayRow: HTMLElement;
   private tickContainer: HTMLElement;
   private validLabel: HTMLElement;
+  private playBtn: HTMLButtonElement;
+  private playing = false;
+  private pending: Promise<void> = Promise.resolve();
   private _cycle = '';
   private _fhour = 0;
   private _maxHour = 18;
   private _source: TimelineSource = 'hrrr';
   private _model: DeterministicModel = 'hrrr';
   private _gefsFhours: number[] | null = null;
-  private onChange: (cycle: string, fhour: number) => void;
+  private onChange: TimelineOptions['onChange'];
   private probeCycle: TimelineOptions['probeCycle'];
   private probeGen = 0;
 
@@ -52,8 +66,10 @@ export class Timeline {
     cycleRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:4px;justify-content:center;';
     const cycleLabel = document.createElement('span');
     cycleLabel.textContent = 'Model Run';
+    cycleLabel.className = 'timeline-run';
     cycleLabel.style.cssText = 'color:#8b949e;font-size:11px;';
     this.modelSelect = document.createElement('select');
+    this.modelSelect.className = 'timeline-run';
     this.modelSelect.style.cssText = 'width:auto;';
     this.modelSelect.title = 'Deterministic model';
     for (const m of Object.keys(MODEL_LABELS) as DeterministicModel[]) {
@@ -66,10 +82,36 @@ export class Timeline {
       this.setModel(this.modelSelect.value as DeterministicModel);
     });
     this.cycleSelect = document.createElement('select');
+    this.cycleSelect.className = 'timeline-run';
     this.cycleSelect.style.cssText = 'width:auto;';
     this.validLabel = document.createElement('span');
+    this.validLabel.className = 'timeline-valid';
     this.validLabel.style.cssText = 'color:#7ee787;font-size:11px;';
-    cycleRow.append(cycleLabel, this.modelSelect, this.cycleSelect, this.validLabel);
+
+    this.playBtn = document.createElement('button');
+    this.playBtn.className = 'timeline-btn timeline-play';
+    this.playBtn.addEventListener('click', () => this.setPlaying(!this.playing));
+    this.updatePlayBtn();
+    const nowBtn = document.createElement('button');
+    nowBtn.className = 'timeline-btn';
+    nowBtn.textContent = 'Now';
+    nowBtn.title = 'Jump to the current time';
+    nowBtn.addEventListener('click', () => this.selectNow());
+
+    const chips = document.createElement('div');
+    chips.className = 'timeline-models';
+    for (const m of Object.keys(MODEL_LABELS) as DeterministicModel[]) {
+      const chip = document.createElement('button');
+      chip.className = 'timeline-model';
+      chip.textContent = MODEL_LABELS[m];
+      chip.title = MODEL_HINTS[m];
+      chip.addEventListener('click', () => this.setModel(m));
+      chips.appendChild(chip);
+      this.modelChips.set(m, chip);
+    }
+    this.updateModelChips();
+
+    cycleRow.append(this.playBtn, cycleLabel, this.modelSelect, this.cycleSelect, this.validLabel, nowBtn, chips);
 
     // Scrollable container for day labels + ticks (scroll together)
     const scrollWrap = document.createElement('div');
@@ -114,6 +156,7 @@ export class Timeline {
       this.modelSelect.value = source;
     }
     this.modelSelect.disabled = source === 'gefs';
+    this.updateModelChips();
 
     this.populateCycles();
     this.rebuildTicks();
@@ -130,6 +173,7 @@ export class Timeline {
     this.modelSelect.value = model;
     if (model === this._model) return;
     this._model = model;
+    this.updateModelChips();
     if (this._source === 'gefs') return;
     const prevValidMs = this.validDate().getTime();
     this._source = model;
@@ -139,6 +183,13 @@ export class Timeline {
   }
 
   get source(): TimelineSource { return this._source; }
+
+  private updateModelChips(): void {
+    for (const [m, chip] of this.modelChips) {
+      chip.classList.toggle('active', m === this._model);
+      chip.disabled = this._source === 'gefs';
+    }
+  }
 
   private populateCycles(): void {
     const cycles = this._source === 'gefs'
@@ -298,7 +349,60 @@ export class Timeline {
       if (isActive) tickEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     }
     this.updateValidLabel();
-    this.onChange(this._cycle, this._fhour);
+    this.pending = Promise.resolve(this.onChange(this._cycle, this._fhour)).catch(() => {});
+  }
+
+  /** Select the forecast hour closest to the current wall-clock time. */
+  selectNow(): void {
+    this.selectValidTime(Date.now());
+  }
+
+  /** True if `validMs` falls within the current cycle's forecast range. */
+  covers(validMs: number): boolean {
+    const h = (validMs - parseCycleUTC(this._cycle).getTime()) / 3600000;
+    return h >= 0 && h <= this._maxHour;
+  }
+
+  /** Select the forecast hour whose valid time is closest to `validMs`. */
+  selectValidTime(validMs: number): void {
+    const hours = this.hours();
+    const want = (validMs - parseCycleUTC(this._cycle).getTime()) / 3600000;
+    let best = hours[0] ?? 0;
+    for (const h of hours) {
+      if (Math.abs(h - want) < Math.abs(best - want)) best = h;
+    }
+    this.selectHour(best);
+  }
+
+  /** Start or stop looping playback through the forecast hours. */
+  setPlaying(playing: boolean): void {
+    if (playing === this.playing) return;
+    this.playing = playing;
+    this.updatePlayBtn();
+    if (playing) void this.playLoop();
+  }
+
+  private async playLoop(): Promise<void> {
+    while (this.playing) {
+      await this.pending;
+      await new Promise((r) => setTimeout(r, PLAY_DWELL_MS));
+      if (!this.playing) return;
+      const hours = this.hours();
+      const next = hours[(hours.indexOf(this._fhour) + 1) % hours.length];
+      if (next === undefined) return;
+      this.selectHour(next);
+    }
+  }
+
+  private updatePlayBtn(): void {
+    this.playBtn.textContent = this.playing ? '\u23F8' : '\u25B6';
+    this.playBtn.title = this.playing ? 'Pause' : 'Play forecast';
+  }
+
+  /** Selectable forecast hours for the current source, ascending. */
+  hours(): number[] {
+    if (this._source === 'gefs' && this._gefsFhours) return this._gefsFhours;
+    return Array.from({ length: this._maxHour + 1 }, (_, h) => h);
   }
 
   /** Step forward or backward. For GEFS, steps to next/prev valid forecast hour. */
@@ -328,7 +432,7 @@ export class Timeline {
     const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
     const mon = valid.getMonth() + 1;
     const date = valid.getDate();
-    this.validLabel.textContent = `Valid: ${day} ${h12}${ampm} ${mon}/${date}`;
+    this.validLabel.innerHTML = `<span class="timeline-run">Valid: </span>${day} ${h12}${ampm} ${mon}/${date}`;
   }
 }
 

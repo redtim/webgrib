@@ -1,0 +1,187 @@
+/**
+ * Easy mode: a simplified UI over the same map and layers as the expert
+ * panel. Shows a short, plain-language list of fill layers (pick one) and
+ * overlays (any combination) on a right-hand rail, a compact "what am I looking at" card with the legend, and a toggle
+ * to switch to the expert UI. The mode is stored on <html data-mode> so CSS
+ * can show/hide each UI, and persisted to localStorage.
+ */
+
+import { colormap } from '../renderer/colormaps.js';
+import { findVariable } from '../renderer/catalog.js';
+import type { CatalogVariable } from '../renderer/catalog.js';
+
+export type UiMode = 'easy' | 'expert';
+
+// Also read by the inline script in index.html that sets the mode before first paint.
+const STORAGE_KEY = 'gribwebview-mode';
+
+export function getUiMode(): UiMode {
+  return document.documentElement.dataset.mode === 'expert' ? 'expert' : 'easy';
+}
+
+interface EasyLayer {
+  /** Catalog variable id. */
+  id: string;
+  /** Plain-language name shown instead of the catalog label. */
+  label: string;
+  group: string;
+}
+
+/** Curated fill layers, in display order. Everything else is expert-only. */
+const EASY_LAYERS: EasyLayer[] = [
+  { id: 'wind', label: 'Wind', group: 'Weather' },
+  { id: 'gust', label: 'Gusts', group: 'Weather' },
+  { id: 'temperature', label: 'Temperature', group: 'Weather' },
+  { id: 'prate', label: 'Rain', group: 'Weather' },
+  { id: 'refc', label: 'Radar', group: 'Weather' },
+  { id: 'cloud-cover', label: 'Clouds', group: 'Weather' },
+  { id: 'snod', label: 'Snow depth', group: 'Weather' },
+  { id: 'vis', label: 'Visibility', group: 'Weather' },
+  { id: 'cape', label: 'Storm potential', group: 'Weather' },
+  { id: 'sfbofs-currents', label: 'Currents', group: 'SF Bay' },
+  { id: 'sfbofs-water-level', label: 'Tide height', group: 'SF Bay' },
+  { id: 'sfbay-water-depth', label: 'Water depth', group: 'SF Bay' },
+];
+
+export interface EasyOverlay {
+  id: string;
+  label: string;
+  /** Character shown in the rail icon. */
+  glyph: string;
+  /** Icon background / glyph colors. */
+  background: string;
+  color: string;
+}
+
+/** Overlays that stack on top of whichever fill is showing. */
+export const EASY_OVERLAYS: EasyOverlay[] = [
+  { id: 'particles', label: 'Wind animation', glyph: '\u2248', background: '#1f2d3d', color: '#79c0ff' },
+  { id: 'isobars', label: 'Pressure lines', glyph: 'P', background: '#1a2a3a', color: '#8bc4ea' },
+  { id: 'lightning', label: 'Lightning', glyph: '\u26A1', background: '#3d2d1f', color: '#ffcf57' },
+  { id: 'waterlevels', label: 'Water level stations', glyph: 'W', background: '#1f2d3d', color: '#58a6ff' },
+  { id: 'tidepredictions', label: 'Tide stations', glyph: 'T', background: '#1f3d2e', color: '#7ee787' },
+  { id: 'currentpredictions', label: 'Current stations', glyph: 'C', background: '#2d1f3d', color: '#d2a8ff' },
+];
+
+/** Plain-language label for a variable, falling back to its catalog label. */
+export function easyLabel(variable: CatalogVariable): string {
+  return EASY_LAYERS.find((l) => l.id === variable.id)?.label ?? variable.label;
+}
+
+/** CSS gradient previewing a variable's colormap, used as its rail icon. */
+function swatchGradient(variable: CatalogVariable): string {
+  const rgba = colormap(variable.colormap ?? 'wind');
+  const stops: string[] = [];
+  // Skip the low end, which many colormaps fade to transparent.
+  for (const t of [0.2, 0.4, 0.6, 0.8, 1]) {
+    const i = Math.min(255, Math.round(t * 255)) * 4;
+    stops.push(`rgb(${rgba[i]},${rgba[i + 1]},${rgba[i + 2]})`);
+  }
+  return `linear-gradient(135deg, ${stops.join(', ')})`;
+}
+
+export interface EasyUIOptions {
+  onSelect: (variable: CatalogVariable) => void;
+  onOverlay: (id: string, visible: boolean) => void;
+  onModeChange: (mode: UiMode) => void;
+}
+
+export class EasyUI {
+  /** Where the shared legend lives while easy mode is active. */
+  readonly legendSlot: HTMLElement;
+  private card: HTMLElement;
+  private title: HTMLElement;
+  private modeBtn: HTMLButtonElement;
+  private overlayItems = new Map<string, HTMLElement>();
+  private items = new Map<string, HTMLElement>();
+  private onModeChange: (mode: UiMode) => void;
+
+  constructor(opts: EasyUIOptions) {
+    this.onModeChange = opts.onModeChange;
+    this.card = document.getElementById('easy-card')!;
+    this.title = document.getElementById('easy-title')!;
+    this.legendSlot = document.getElementById('easy-legend')!;
+    const rail = document.getElementById('easy-rail')!;
+
+    let group = '';
+    for (const layer of EASY_LAYERS) {
+      const variable = findVariable(layer.id);
+      if (!variable) continue;
+      if (layer.group !== group) {
+        group = layer.group;
+        rail.appendChild(railHeader(group));
+      }
+      const item = railItem(layer.label, swatchGradient(variable));
+      item.addEventListener('click', () => opts.onSelect(variable));
+      rail.appendChild(item);
+      this.items.set(layer.id, item);
+    }
+
+    rail.appendChild(railHeader('Overlays'));
+    for (const overlay of EASY_OVERLAYS) {
+      const item = railItem(overlay.label, overlay.background, overlay.glyph);
+      item.style.setProperty('--glyph-color', overlay.color);
+      item.addEventListener('click', () => {
+        opts.onOverlay(overlay.id, !item.classList.contains('active'));
+      });
+      rail.appendChild(item);
+      this.overlayItems.set(overlay.id, item);
+    }
+
+    this.modeBtn = document.getElementById('mode-toggle') as HTMLButtonElement;
+    this.modeBtn.addEventListener('click', () => {
+      this.setMode(getUiMode() === 'easy' ? 'expert' : 'easy');
+    });
+    this.updateModeBtn();
+  }
+
+  setMode(mode: UiMode): void {
+    document.documentElement.dataset.mode = mode;
+    localStorage.setItem(STORAGE_KEY, mode);
+    this.updateModeBtn();
+    this.onModeChange(mode);
+  }
+
+  setActive(variable: CatalogVariable): void {
+    for (const [id, el] of this.items) el.classList.toggle('active', id === variable.id);
+    this.title.textContent = easyLabel(variable);
+  }
+
+  setBusy(busy: boolean): void {
+    this.card.classList.toggle('busy', busy);
+  }
+
+  setOverlay(id: string, visible: boolean): void {
+    this.overlayItems.get(id)?.classList.toggle('active', visible);
+  }
+
+  private updateModeBtn(): void {
+    const easy = getUiMode() === 'easy';
+    this.modeBtn.textContent = easy ? 'Expert mode' : 'Easy mode';
+    this.modeBtn.title = easy
+      ? 'Show all variables, levels and model runs'
+      : 'Switch to the simplified view';
+  }
+}
+
+function railHeader(text: string): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'easy-rail-header';
+  el.textContent = text;
+  return el;
+}
+
+function railItem(label: string, swatchBackground: string, glyph = ''): HTMLElement {
+  const item = document.createElement('button');
+  item.className = 'easy-rail-item';
+  item.title = label;
+  const text = document.createElement('span');
+  text.className = 'easy-rail-label';
+  text.textContent = label;
+  const swatch = document.createElement('span');
+  swatch.className = 'easy-rail-swatch';
+  swatch.style.background = swatchBackground;
+  swatch.textContent = glyph;
+  item.append(text, swatch);
+  return item;
+}

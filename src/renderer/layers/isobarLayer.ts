@@ -113,6 +113,27 @@ export class IsobarLayer {
     if (this.map && this.visible) this.draw();
   }
 
+  /**
+   * Bilinearly sample pressure (Pa) at a geographic point. Returns null
+   * outside the grid, before data has loaded, or where data is missing.
+   */
+  sampleAt(lon: number, lat: number): number | null {
+    if (!this.data) return null;
+    const { values, nx, ny, bounds } = this.data;
+    const fx = ((lon - bounds.lonMin) / (bounds.lonMax - bounds.lonMin)) * (nx - 1);
+    const fy = ((lat - bounds.latMin) / (bounds.latMax - bounds.latMin)) * (ny - 1);
+    if (fx < 0 || fx > nx - 1 || fy < 0 || fy > ny - 1) return null;
+    const i0 = Math.floor(fx);
+    const j0 = Math.floor(fy);
+    const i1 = Math.min(nx - 1, i0 + 1);
+    const j1 = Math.min(ny - 1, j0 + 1);
+    const tx = fx - i0;
+    const ty = fy - j0;
+    const p = (values[j0 * nx + i0]! * (1 - tx) + values[j0 * nx + i1]! * tx) * (1 - ty)
+      + (values[j1 * nx + i0]! * (1 - tx) + values[j1 * nx + i1]! * tx) * ty;
+    return Number.isFinite(p) ? p : null;
+  }
+
   // ---- contouring (marching squares) ----------------------------------------
 
   private computeContours(): ContourLine[] {

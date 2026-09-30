@@ -7,21 +7,25 @@
  *
  *   { type: 'decode', jobId, idxUrl, query: IdxQuery }
  *   { type: 'decode-pair', jobId, idxUrl, queryU, queryV }  // for wind layers
+ *   { type: 'sample', jobId, idxUrl, queries, lon, lat }    // point forecast
  *
  * Reply (worker → main):
  *
  *   { type: 'decoded', jobId, field: SerializedField, grid: GridSummary }
  *   { type: 'decoded-pair', jobId, u, v, grid }
+ *   { type: 'sampled', jobId, values, convergence }
  *   { type: 'error', jobId, message }
  */
 
 import { decodeMessage, ensureJpxDecoder, fetchMessageBytes, walkMessages } from '../grib2/index.js';
-import type { DecodedField, GribMessage, GridDefinition } from '../grib2/types.js';
+import type { DecodedField, GribMessage, GridDefinition, LambertConformalGrid } from '../grib2/types.js';
+import { sampleLccPoint } from '../grib2/resample.js';
 import type { IdxQuery } from '../grib2/idx.js';
 
 type InMsg =
   | { type: 'decode'; jobId: number; idxUrl: string; query: IdxQuery }
   | { type: 'decode-pair'; jobId: number; idxUrl: string; queryU: IdxQuery; queryV: IdxQuery }
+  | { type: 'sample'; jobId: number; idxUrl: string; queries: IdxQuery[]; lon: number; lat: number }
   | { type: 'decode-ensemble'; jobId: number; idxUrls: string[]; query: IdxQuery }
   | { type: 'decode-ensemble-pair'; jobId: number; idxUrls: string[]; queryU: IdxQuery; queryV: IdxQuery };
 
@@ -103,6 +107,13 @@ self.addEventListener('message', async (ev: MessageEvent<InMsg>) => {
         },
         { transfer: [u.field.values.buffer, v.field.values.buffer] },
       );
+    } else if (msg.type === 'sample') {
+      // Sampling here keeps the full grids off the main thread and out of its caches.
+      const results = await Promise.all(msg.queries.map((q) => fetchAndDecode(msg.idxUrl, q)));
+      const grid = results[0]!.grid;
+      if (grid.template !== 30) throw new Error('Point sampling needs a Lambert Conformal grid');
+      const sample = sampleLccPoint(results.map((r) => r.field), grid as LambertConformalGrid, msg.lon, msg.lat);
+      (self as unknown as Worker).postMessage({ type: 'sampled', jobId: msg.jobId, ...sample });
     } else if (msg.type === 'decode-ensemble') {
       const results = await Promise.all(
         msg.idxUrls.map((url) => fetchAndDecode(url, msg.query)),
