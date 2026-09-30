@@ -1591,6 +1591,33 @@ async function main(): Promise<void> {
     return rows;
   }
 
+  // ---- dev tool: regenerate the easy-mode icons --------------------------------
+
+  if (import.meta.env.DEV && urlParams.has('capture-icons')) {
+    const { captureIcons } = await import('./iconCapture.js');
+    urlReady = false; // leave the URL alone while layers are cycled
+    void captureIcons({
+      map,
+      showFill: async (id) => {
+        const variable = findVariable(id);
+        if (!variable) throw new Error(`Unknown layer ${id}`);
+        selectVariable(variable, false);
+        await loadLevel(variable, 0, timeline.cycle, timeline.fhour);
+      },
+      hideFill: () => {
+        scalarLayer.setVisible(false);
+        windLayer.setVisible(false);
+      },
+      setOverlay: (id, on) => {
+        const box = overlayBoxes.get(id);
+        if (!box) return;
+        box.checked = on;
+        box.dispatchEvent(new Event('change'));
+      },
+    });
+    return;
+  }
+
   // ---- auto-load default variable on startup --------------------------------
 
   const defaultVar = (urlLayer && findVariable(urlLayer)) || findVariable('wind') || CATALOG[0];
