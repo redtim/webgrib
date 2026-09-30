@@ -279,6 +279,18 @@ async function main(): Promise<void> {
     console.warn('MapLibre error:', e.error ?? e);
   });
 
+  // Locate-me button. First click centres on the user (without zooming in
+  // past 12 so the bay context stays visible); it then follows the user
+  // until the map is panned. Styled in index.html to match the dark UI.
+  map.addControl(
+    new maplibregl.GeolocateControl({
+      positionOptions: { enableHighAccuracy: true },
+      trackUserLocation: true,
+      fitBoundsOptions: { maxZoom: 12 },
+    }),
+    'bottom-left',
+  );
+
   // Layers are created once, reused across presets.
   const FILL_OPACITY = 0.85;
   const scalarLayer = new ScalarFieldLayer({ id: 'hrrr-scalar', colormap: 'turbo', opacity: FILL_OPACITY });
