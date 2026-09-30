@@ -116,6 +116,20 @@ export class DecodeClient {
     return result;
   }
 
+  /** Values of each queried field at one point, without keeping the grids. */
+  async samplePoint(
+    idxUrl: string,
+    queries: IdxQuery[],
+    lon: number,
+    lat: number,
+  ): Promise<{ values: number[]; convergence: number }> {
+    const jobId = ++this.jobId;
+    return new Promise((resolve, reject) => {
+      this.pending.set(jobId, { resolve, reject });
+      this.worker.postMessage({ type: 'sample', jobId, idxUrl, queries, lon, lat });
+    });
+  }
+
   async decodeEnsemble(idxUrls: string[], query: IdxQuery): Promise<EnsembleResult> {
     const jobId = ++this.jobId;
     return new Promise<EnsembleResult>((resolve, reject) => {
@@ -141,6 +155,8 @@ export class DecodeClient {
       p.resolve({ field: ev.data.field, grid: ev.data.grid });
     } else if (type === 'decoded-pair') {
       p.resolve({ u: ev.data.u, v: ev.data.v, grid: ev.data.grid });
+    } else if (type === 'sampled') {
+      p.resolve({ values: ev.data.values, convergence: ev.data.convergence });
     } else if (type === 'decoded-ensemble') {
       p.resolve({ mean: ev.data.mean, spread: ev.data.spread, grid: ev.data.grid });
     } else if (type === 'decoded-ensemble-pair') {

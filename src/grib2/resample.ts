@@ -217,6 +217,83 @@ export function resampleLccToLatLon(
 }
 
 /**
+ * Bilinearly sample co-located LCC fields at one geographic point. Values
+ * are NaN outside the grid. `convergence` is the grid-north to true-north
+ * angle (radians) at the point, for rotating grid-relative u/v.
+ */
+export function sampleLccPoint(
+  fields: DecodedField[],
+  grid: LambertConformalGrid,
+  lon: number,
+  lat: number,
+): { values: number[]; convergence: number } {
+  const lcc = computeLccUniforms(grid);
+  const convergence = lcc.n * wrapPi(lon * DEG - lcc.lambda0);
+  const { u: gu, v: gv } = lonLatToGridUV(lcc, lon, lat);
+  if (gu < 0 || gu > 1 || gv < 0 || gv > 1) {
+    return { values: fields.map(() => NaN), convergence };
+  }
+  const values = fields.map((f) => {
+    const fx = gu * (f.nx - 1);
+    const fy = gv * (f.ny - 1);
+    const i0 = Math.floor(fx);
+    const j0 = Math.floor(fy);
+    const i1 = Math.min(f.nx - 1, i0 + 1);
+    const j1 = Math.min(f.ny - 1, j0 + 1);
+    const tx = fx - i0;
+    const ty = fy - j0;
+    const v = f.values;
+    return (v[j0 * f.nx + i0]! * (1 - tx) + v[j0 * f.nx + i1]! * tx) * (1 - ty)
+      + (v[j1 * f.nx + i0]! * (1 - tx) + v[j1 * f.nx + i1]! * tx) * ty;
+  });
+  return { values, convergence };
+}
+
+/**
+ * Resample an LCC scalar field onto a regular lat/lon grid covering the
+ * source grid's bounding box. Row 0 is the southernmost; cells outside the
+ * source grid are NaN. Used to contour HRRR/RRFS pressure as isobars.
+ */
+export function sampleLccScalarAtLatLon(
+  field: DecodedField,
+  grid: LambertConformalGrid,
+  targetNx: number,
+  targetNy: number,
+): { values: Float32Array; nx: number; ny: number; bounds: { lonMin: number; lonMax: number; latMin: number; latMax: number } } {
+  const lcc = computeLccUniforms(grid);
+  const bounds = gridLonLatBounds(lcc);
+  const src = field.values;
+  const srcNx = field.nx;
+  const dx = (bounds.lonMax - bounds.lonMin) / (targetNx - 1);
+  const dy = (bounds.latMax - bounds.latMin) / (targetNy - 1);
+  const values = new Float32Array(targetNx * targetNy);
+
+  for (let j = 0; j < targetNy; j++) {
+    const lat = bounds.latMin + j * dy;
+    for (let i = 0; i < targetNx; i++) {
+      const { u: gu, v: gv } = lonLatToGridUV(lcc, bounds.lonMin + i * dx, lat);
+      if (gu < 0 || gu > 1 || gv < 0 || gv > 1) {
+        values[j * targetNx + i] = NaN;
+        continue;
+      }
+      const fx = gu * (srcNx - 1);
+      const fy = gv * (field.ny - 1);
+      const i0 = Math.floor(fx);
+      const j0 = Math.floor(fy);
+      const i1 = Math.min(srcNx - 1, i0 + 1);
+      const j1 = Math.min(field.ny - 1, j0 + 1);
+      const tx = fx - i0;
+      const ty = fy - j0;
+      values[j * targetNx + i] =
+        (src[j0 * srcNx + i0]! * (1 - tx) + src[j0 * srcNx + i1]! * tx) * (1 - ty)
+        + (src[j1 * srcNx + i0]! * (1 - tx) + src[j1 * srcNx + i1]! * tx) * ty;
+    }
+  }
+
+  return { values, nx: targetNx, ny: targetNy, bounds };
+}
+
+/**
  * Sample HRRR LCC wind at regular lat/lon grid points with caller-supplied bounds.
  * Returns true-north u/v components on the target grid.
  * Used to resample HRRR onto an OFS grid for layer combination.
