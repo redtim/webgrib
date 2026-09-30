@@ -10,7 +10,7 @@
 
 import maplibregl from 'maplibre-gl';
 import { ScalarFieldLayer, WindyLayer, LightningLayer, IsobarLayer } from '../renderer/index.js';
-import { hrrrUrls, rrfsUrls, forecastQuery, gefsUrls, gefsStatsUrls, GEFS_FHOURS } from '../grib2/idx.js';
+import { politeFetch, hrrrUrls, rrfsUrls, forecastQuery, gefsUrls, gefsStatsUrls, GEFS_FHOURS } from '../grib2/idx.js';
 import type { LatLonGrid, GridDefinition, LambertConformalGrid } from '../grib2/types.js';
 import { DecodeClient } from '../worker/client.js';
 import { CATALOG, findVariable, displayRange, displayUnit, isAvailableFor } from '../renderer/catalog.js';
@@ -89,7 +89,7 @@ function scalarQueryFor(model: DeterministicModel, level: VariableLevel): LayerQ
  */
 async function cycleExists(model: DeterministicModel, cycle: string, fhour: number): Promise<boolean> {
   // no-store: a cached non-CORS response for the same URL would fail the CORS check.
-  const res = await fetch(deterministicIdxUrl(model, cycle, fhour), { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+  const res = await politeFetch(deterministicIdxUrl(model, cycle, fhour), { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
   void res.body?.cancel();
   return res.ok;
 }
@@ -1447,7 +1447,10 @@ async function main(): Promise<void> {
       return;
     }
 
-    const slots = timeline.slots();
+    // RRFS comes from rate-limited NOMADS, so thin its long range to 3-hourly.
+    const slots = timeline.model === 'rrfs'
+      ? timeline.slots().filter((s, i) => i <= 18 || s.fhour % 3 === 0)
+      : timeline.slots();
     forecastStrip.open(
       title,
       slots.map(({ fhour, validMs }) => ({ fhour, valid: new Date(validMs) })),
