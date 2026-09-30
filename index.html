@@ -256,6 +256,41 @@
         font-weight: bold; flex-shrink: 0;
       }
 
+      /* ---- map controls (locate-me) ---- */
+      .maplibregl-ctrl-bottom-left { z-index: 10; }
+      /* Lifted clear of the timeline bar, which spans most of the width on
+         narrow screens (expert: bottom 10vh; easy: bottom 24px). */
+      .maplibregl-ctrl-bottom-left .maplibregl-ctrl-group {
+        margin: 0 0 calc(10vh + 108px) calc(var(--panel-width) + 12px);
+        transition: margin-left 0.2s ease;
+        background: rgba(22, 27, 34, 0.85);
+        border: 1px solid #30363d; border-radius: 999px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+      }
+      .maplibregl-ctrl-group button.maplibregl-ctrl-geolocate {
+        width: 40px; height: 40px; border-radius: 999px;
+      }
+      .maplibregl-ctrl-group button.maplibregl-ctrl-geolocate:not(:disabled):hover {
+        background-color: rgba(48, 54, 61, 0.95);
+      }
+      .maplibregl-ctrl-group button.maplibregl-ctrl-geolocate:disabled { opacity: 0.4; }
+      :root[data-mode="easy"] .maplibregl-ctrl-bottom-left .maplibregl-ctrl-group { margin-bottom: 132px; }
+      .maplibregl-ctrl button.maplibregl-ctrl-geolocate .maplibregl-ctrl-icon {
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e6edf3' stroke-width='1.8' stroke-linecap='round'><circle cx='12' cy='12' r='6'/><circle cx='12' cy='12' r='1.6' fill='%23e6edf3' stroke='none'/><path d='M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22'/></svg>");
+      }
+      .maplibregl-ctrl button.maplibregl-ctrl-geolocate-active .maplibregl-ctrl-icon,
+      .maplibregl-ctrl button.maplibregl-ctrl-geolocate-background .maplibregl-ctrl-icon {
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2358a6ff' stroke-width='1.8' stroke-linecap='round'><circle cx='12' cy='12' r='6'/><circle cx='12' cy='12' r='2.2' fill='%2358a6ff' stroke='none'/><path d='M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22'/></svg>");
+      }
+      .maplibregl-ctrl button.maplibregl-ctrl-geolocate-active-error .maplibregl-ctrl-icon,
+      .maplibregl-ctrl button.maplibregl-ctrl-geolocate-background-error .maplibregl-ctrl-icon {
+        background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ff7b72' stroke-width='1.8' stroke-linecap='round'><circle cx='12' cy='12' r='6'/><path d='M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22M9.5 9.5l5 5M14.5 9.5l-5 5'/></svg>");
+      }
+      .maplibregl-ctrl button.maplibregl-ctrl-geolocate-waiting .maplibregl-ctrl-icon {
+        animation: easy-spin 1s linear infinite;
+      }
+      .maplibregl-user-location-dot, .maplibregl-user-location-dot::before { background-color: #58a6ff; }
+
       /* ---- easy mode ---- */
       #easy-card, #easy-rail { display: none; }
       #mode-toggle {
