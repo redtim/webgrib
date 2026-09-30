@@ -205,7 +205,14 @@ export default function Windy(params) {
     for (var j = 0; j < nj; j++) {
       var row = [];
       for (var i = 0; i < ni; i++, p++) {
-        row[i] = builder.data(p);
+        // gribwebview patch: treat NaN samples as missing so the
+        // interpolator returns null there instead of a NaN vector.
+        var d = builder.data(p);
+        if (d !== null && d !== undefined) {
+          if (Array.isArray(d)) { if (d[0] !== d[0] || d[1] !== d[1]) d = null; }
+          else if (d !== d) d = null;
+        }
+        row[i] = d;
       }
       if (isContinuous) {
         // For wrapped grids, duplicate first column as last column to simplify interpolation logic
@@ -402,7 +409,8 @@ export default function Windy(params) {
         if (coord) {
           var λ = coord[0],
             φ = coord[1];
-          if (isFinite(λ)) {
+          // gribwebview patch: optional screen-space land mask.
+          if (isFinite(λ) && (!params.isWater || params.isWater(x, y))) {
             var wind = grid.interpolate(λ, φ);
             if (wind) {
               wind = distort(projection, λ, φ, x, y, velocityScale, wind);
