@@ -127,14 +127,13 @@ test('HRRR REFC decode (spatial diff 5.3)', async (t) => {
   assert.ok(field.max >= -40 && field.max <= 100, `REFC max in dBZ range, got ${field.max}`);
 });
 
-// ---- RRFS (NOMADS) ---------------------------------------------------------
+// ---- RRFS (S3) -------------------------------------------------------------
 
-// rrfsUrls() points at the browser CORS proxy; Node can hit NOMADS directly.
 const rrfsIdx = (cycle: string, fhour: number, product?: RrfsProduct): string =>
-  rrfsUrls(cycle, fhour, product).idx.replace(/^.*\/nomads\//, 'https://nomads.ncep.noaa.gov/');
+  rrfsUrls(cycle, fhour, product).idx;
 
 async function mostRecentRrfsCycle(): Promise<string> {
-  // The RRFS parallel feed skips cycles now and then, so look back further.
+  // A cycle takes a couple of hours to land in the bucket, so look back a while.
   const now = new Date(Date.now() - 3 * 3600 * 1000);
   for (let i = 0; i < 12; i++) {
     const d = new Date(now.getTime() - i * 3600 * 1000);

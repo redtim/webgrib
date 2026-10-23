@@ -138,11 +138,6 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path: string) => path.replace(/^\/ofs-proxy\/s3/, ''),
       },
-      '/ofs-proxy/nomads': {
-        target: 'https://nomads.ncep.noaa.gov',
-        changeOrigin: true,
-        rewrite: (path: string) => path.replace(/^\/ofs-proxy\/nomads/, ''),
-      },
     },
   },
   resolve: {

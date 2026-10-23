@@ -84,39 +84,6 @@ export interface FetchOptions {
   headers?: Record<string, string>;
 }
 
-/**
- * NOMADS blocks clients that exceed about 120 hits a minute, answering every
- * request with a 302 to an "Over Rate Limit" page until they back off. Space
- * requests out to stay under it, and stop sending for a while once blocked,
- * since hammering a blocked server only extends the block.
- */
-const NOMADS_MIN_INTERVAL_MS = 600;
-const NOMADS_COOLDOWN_MS = 60_000;
-let nomadsNextAt = 0;
-let nomadsBlockedUntil = 0;
-
-function nomadsBlockedError(): Error {
-  const secs = Math.ceil((nomadsBlockedUntil - Date.now()) / 1000);
-  return new Error(`NOMADS rate limit reached; RRFS requests paused for ${secs} s`);
-}
-
-/** `fetch` that paces and backs off requests bound for NOMADS. */
-export async function politeFetch(url: string, init?: RequestInit): Promise<Response> {
-  if (!url.includes('/nomads/')) return fetch(url, init);
-  if (Date.now() < nomadsBlockedUntil) throw nomadsBlockedError();
-  const at = Math.max(Date.now(), nomadsNextAt);
-  nomadsNextAt = at + NOMADS_MIN_INTERVAL_MS;
-  if (at > Date.now()) await new Promise((r) => setTimeout(r, at - Date.now()));
-  init?.signal?.throwIfAborted();
-  if (Date.now() < nomadsBlockedUntil) throw nomadsBlockedError();
-  const res = await fetch(url, init);
-  if (res.status === 302 || res.status === 429) {
-    nomadsBlockedUntil = Date.now() + NOMADS_COOLDOWN_MS;
-    throw nomadsBlockedError();
-  }
-  return res;
-}
-
 /** Parsed .idx files by URL. A published .idx never changes, and every layer of a frame shares one. */
 const idxCache = new Map<string, Promise<IdxRecord[]>>();
 const IDX_CACHE_MAX = 256;
@@ -125,7 +92,7 @@ export function fetchIdx(idxUrl: string, opts: FetchOptions = {}): Promise<IdxRe
   const cached = idxCache.get(idxUrl);
   if (cached) return cached;
   const request = (async () => {
-    const res = await politeFetch(idxUrl, { signal: opts.signal, headers: opts.headers });
+    const res = await fetch(idxUrl, { signal: opts.signal, headers: opts.headers });
     if (!res.ok) throw new Error(`Failed to fetch idx ${idxUrl}: ${res.status}`);
     return parseIdx(await res.text());
   })();
@@ -157,7 +124,7 @@ export async function fetchMessageBytes(
   const start = hit.byteOffset;
   const end = hit.byteLengthOrUndefined != null ? start + hit.byteLengthOrUndefined - 1 : '';
   const range = `bytes=${start}-${end}`;
-  const res = await politeFetch(dataUrl, {
+  const res = await fetch(dataUrl, {
     signal: opts.signal,
     headers: { Range: range, ...(opts.headers ?? {}) },
   });
@@ -201,31 +168,24 @@ export function hrrrUrls(cycle: string, fhour: number, product: 'wrfsfcf' | 'wrf
 }
 
 /**
- * RRFS (Rapid Refresh Forecast System) deterministic CONUS output on NOMADS.
+ * RRFS (Rapid Refresh Forecast System) deterministic CONUS output on the
+ * NOAA Open Data bucket:
  *
- *   {base}/rrfs.YYYYMMDD/HH/rrfs.tHHz.{2dfld|prslev}.3km.fFFF.conus.grib2
+ *   https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.YYYYMMDD/HH/rrfs.tHHz.{2dfld|prslev}.3km.fFFF.conus.grib2
  *
  * The CONUS subset is on the same 3 km Lambert Conformal grid as HRRR
  * (1799×1059), so everything downstream of the decoder is shared. Surface
  * and single-level fields live in `2dfld`; isobaric levels live in `prslev`.
- *
- * NOMADS sends no CORS headers, so requests go through the same proxy as OFS
- * (Vite dev proxy locally, Cloudflare Worker in production).
- *
- * RRFS became operational on 2026-10-14 (SCN 26-48); before that only the
- * parallel feed under `rrfs/para` exists. Flip RRFS_STREAM to 'prod' once the
- * `rrfs/prod` directory is populated.
+ * The bucket sends CORS headers like the HRRR one, so no proxy is needed.
+ * (The older `noaa-rrfs-pds` bucket holds only retrospective and prototype
+ * runs.)
  */
 export type RrfsProduct = '2dfld' | 'prslev';
-
-const RRFS_STREAM: 'para' | 'prod' = 'para';
-const NOMADS_PROXY: string =
-  (import.meta.env?.VITE_OFS_PROXY_URL as string | undefined) ?? '/ofs-proxy';
 
 export function rrfsUrls(cycle: string, fhour: number, product: RrfsProduct = '2dfld'): { data: string; idx: string } {
   const hh = cycle.slice(8, 10);
   const fh = String(fhour).padStart(3, '0');
-  const base = `${NOMADS_PROXY}/nomads/pub/data/nccf/com/rrfs/${RRFS_STREAM}/rrfs.${cycle.slice(0, 8)}/${hh}/rrfs.t${hh}z.${product}.3km.f${fh}.conus.grib2`;
+  const base = `https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.${cycle.slice(0, 8)}/${hh}/rrfs.t${hh}z.${product}.3km.f${fh}.conus.grib2`;
   return { data: base, idx: base + '.idx' };
 }
 

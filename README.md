@@ -479,7 +479,7 @@ User preferences persist to `localStorage` and are reactive — changing a unit 
 | Source | Endpoint | Format | Grid | Resolution | Variables |
 |--------|----------|--------|------|------------|-----------|
 | **HRRR** | `noaa-hrrr-bdp-pds.s3.amazonaws.com` | GRIB2 + .idx | Lambert Conformal Conic | 3 km, 1799x1059 | Temperature, wind, precipitation, reflectivity, CAPE, clouds, visibility, etc. |
-| **RRFS** | `nomads.ncep.noaa.gov/.../rrfs/para` (via proxy `/nomads/`) | GRIB2 + .idx (`2dfld` surface, `prslev` isobaric) | Lambert Conformal Conic (same grid as HRRR) | 3 km, 1799x1059, hourly to f084 at 00/06/12/18z | Same catalog as HRRR, except Echo Top and Vertical Velocity |
+| **RRFS** | `noaa-rrfs-ops-pds.s3.amazonaws.com` | GRIB2 + .idx (`2dfld` surface, `prslev` isobaric) | Lambert Conformal Conic (same grid as HRRR) | 3 km, 1799x1059, hourly to f084 at 00/06/12/18z | Same catalog as HRRR, except Echo Top and Vertical Velocity |
 | **SFBOFS** | `opendap.co-ops.nos.noaa.gov` (via CORS proxy) | DAP2 binary | Regular lat/lon | 329x553 | Ocean surface currents (u/v) |
 | **CUDEM** | `noaa-nos-coastal-lidar-pds.s3.amazonaws.com` (build time only) | Cloud-optimized GeoTIFF | Regular lat/lon | 1/9 arc-second (~3 m), 20 tiles | Topobathy elevation → shoreline polygon |
 | **Lightning** | `wss://ws1.blitzortung.org/` | LZW-compressed JSON | Point data | Real-time | Strike lat/lon/time/polarity |
