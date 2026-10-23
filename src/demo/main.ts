@@ -279,16 +279,17 @@ async function main(): Promise<void> {
     console.warn('MapLibre error:', e.error ?? e);
   });
 
-  // Locate-me button. First click centres on the user (without zooming in
-  // past 12 so the bay context stays visible); it then follows the user
-  // until the map is panned. Styled in index.html to match the dark UI.
+  // Locate-me button, top-right just left of the Easy/Expert mode toggle
+  // (index.html positions it via --mode-toggle-w). First click centres on
+  // the user (without zooming in past 12 so the bay context stays
+  // visible); it then follows the user until the map is panned.
   map.addControl(
     new maplibregl.GeolocateControl({
       positionOptions: { enableHighAccuracy: true },
       trackUserLocation: true,
       fitBoundsOptions: { maxZoom: 12 },
     }),
-    'bottom-left',
+    'top-right',
   );
 
   // Layers are created once, reused across presets.
@@ -296,11 +297,11 @@ async function main(): Promise<void> {
   const scalarLayer = new ScalarFieldLayer({ id: 'hrrr-scalar', colormap: 'turbo', opacity: FILL_OPACITY });
 
   // Grey particle palette — subtle trails over the colored wind-speed raster.
-  const GREY_PARTICLES = [
   // Light winds move particles only a pixel or two per frame, so their
   // trails are short; keep the low end of the ramp bright and fully opaque
   // or they vanish against the fill. The ramp is front-loaded for the same
   // reason: most of the brightness gain happens in the bottom third.
+  const GREY_PARTICLES = [
     'rgb(208,208,208)',
     'rgb(222,222,222)',
     'rgb(232,232,232)',

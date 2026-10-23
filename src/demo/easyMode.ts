@@ -171,6 +171,9 @@ export class EasyUI {
     this.modeBtn.title = easy
       ? 'Show all variables, levels and model runs'
       : 'Switch to the simplified view';
+    // The locate-me map control sits just left of this button; tell CSS
+    // how wide the button is now that its label changed.
+    document.documentElement.style.setProperty('--mode-toggle-w', `${this.modeBtn.offsetWidth}px`);
   }
 }
 
