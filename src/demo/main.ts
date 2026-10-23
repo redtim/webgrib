@@ -1661,12 +1661,11 @@ async function main(): Promise<void> {
       : currentVariable?.label ?? '';
     const spacer = (): void => { if (rows.length) rows.push('<div style="height:4px"></div>'); };
 
-    const s = sampleFill(lng, lat);
+    // A wind-type fill is fully described by the speed/direction block below.
+    const s = fillOwnsParticles(currentVariable) ? null : sampleFill(lng, lat);
     if (s) {
       rows.push(`<div class="inspect-title">${escapeHtml(displayName || 'Scalar')}</div>`);
       rows.push(inspectRow('value', currentVariable?.format?.(s.value) ?? s.value.toFixed(3)));
-      rows.push(inspectRow('grid i,j', `${s.i}, ${s.j}`));
-      if (s.missing > 0) rows.push(inspectRow('note', `${s.missing}/4 corners missing`));
     }
 
     const w = sampleWind(lng, lat);
@@ -1676,7 +1675,6 @@ async function main(): Promise<void> {
       rows.push(`<div class="inspect-title">${escapeHtml(windTitle || 'Wind')}</div>`);
       rows.push(inspectRow('speed', `${convertSpeed(w.speed, getUnitPref('speed')).toFixed(1)} ${unitLabel('speed')}`));
       rows.push(inspectRow('from', `${compassFromBearing(w.directionDeg)} (${w.directionDeg.toFixed(0)}\u00B0)`));
-      rows.push(inspectRow('u / v', `${w.u.toFixed(1)} / ${w.v.toFixed(1)}`));
     }
 
     const p = samplePressure(lng, lat);
