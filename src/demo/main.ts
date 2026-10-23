@@ -297,17 +297,21 @@ async function main(): Promise<void> {
 
   // Grey particle palette — subtle trails over the colored wind-speed raster.
   const GREY_PARTICLES = [
-    'rgba(180,180,180,0.4)',
-    'rgba(190,190,190,0.5)',
-    'rgba(200,200,200,0.6)',
-    'rgba(210,210,210,0.7)',
-    'rgba(220,220,220,0.8)',
-    'rgba(230,230,230,0.85)',
-    'rgba(240,240,240,0.9)',
-    'rgba(245,245,245,0.95)',
-    'rgba(255,255,255,1.0)',
+  // Light winds move particles only a pixel or two per frame, so their
+  // trails are short; keep the low end of the ramp bright and fully opaque
+  // or they vanish against the fill. The ramp is front-loaded for the same
+  // reason: most of the brightness gain happens in the bottom third.
+    'rgb(208,208,208)',
+    'rgb(222,222,222)',
+    'rgb(232,232,232)',
+    'rgb(238,238,238)',
+    'rgb(243,243,243)',
+    'rgb(247,247,247)',
+    'rgb(250,250,250)',
+    'rgb(253,253,253)',
+    'rgb(255,255,255)',
   ];
-  const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9, colorScale: GREY_PARTICLES });
+  const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9, lineWidth: 1.6, colorScale: GREY_PARTICLES });
   const lightningLayer = new LightningLayer();
   const isobarLayer = new IsobarLayer();
   const client = new DecodeClient();
