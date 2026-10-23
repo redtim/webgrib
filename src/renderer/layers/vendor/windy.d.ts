@@ -45,6 +45,8 @@ export interface WindyParams {
   velocityScale?: number;
   particleAge?: number;
   lineWidth?: number;
+  haloColor?: string;
+  haloWidth?: number;
   particleMultiplier?: number;
   frameRate?: number;
   colorScale?: string[];
@@ -56,6 +58,8 @@ export interface WindyOptions {
   velocityScale?: number;
   particleAge?: number;
   lineWidth?: number;
+  haloColor?: string;
+  haloWidth?: number;
   particleMultiplier?: number;
   opacity?: number;
   frameRate?: number;

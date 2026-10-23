@@ -36,6 +36,8 @@ export default function Windy(params) {
     (Math.pow(window.devicePixelRatio, 1 / 3) || 1); // scale for wind velocity (completely arbitrary--this value looks nice)
   var MAX_PARTICLE_AGE = params.particleAge || 90; // max number of frames a particle is drawn before regeneration
   var PARTICLE_LINE_WIDTH = params.lineWidth || 1; // line width of a drawn particle
+  var HALO_COLOR = params.haloColor || null; // stroke drawn under each trail segment for contrast on bright fills
+  var HALO_WIDTH = params.haloWidth || 1; // extra width on each side of the trail (px)
   var PARTICLE_MULTIPLIER = params.particleMultiplier || 1 / 300; // particle count scalar (completely arbitrary--this values looks nice)
   var PARTICLE_REDUCTION = Math.pow(window.devicePixelRatio, 1 / 3) || 1.6; // multiply particle count for mobiles by this amount
   var FRAME_RATE = params.frameRate || 15;
@@ -91,6 +93,9 @@ export default function Windy(params) {
 
     if (options.hasOwnProperty("lineWidth"))
       PARTICLE_LINE_WIDTH = options.lineWidth;
+
+    if (options.hasOwnProperty("haloColor")) HALO_COLOR = options.haloColor;
+    if (options.hasOwnProperty("haloWidth")) HALO_WIDTH = options.haloWidth;
 
     if (options.hasOwnProperty("particleMultiplier"))
       PARTICLE_MULTIPLIER = options.particleMultiplier;
@@ -525,7 +530,23 @@ export default function Windy(params) {
       g.globalCompositeOperation = prev;
       g.globalAlpha = OPACITY === 0 ? 0 : OPACITY * 0.9;
 
+      // Halo pass: one wider dark stroke under every new segment, so the
+      // light trails stay readable over bright, fully opaque fills.
+      if (HALO_COLOR) {
+        g.beginPath();
+        g.strokeStyle = HALO_COLOR;
+        g.lineWidth = PARTICLE_LINE_WIDTH + HALO_WIDTH * 2;
+        buckets.forEach(function(bucket) {
+          bucket.forEach(function(particle) {
+            g.moveTo(particle.x, particle.y);
+            g.lineTo(particle.xt, particle.yt);
+          });
+        });
+        g.stroke();
+      }
+
       // Draw new particle trails.
+      g.lineWidth = PARTICLE_LINE_WIDTH;
       buckets.forEach(function(bucket, i) {
         if (bucket.length > 0) {
           g.beginPath();

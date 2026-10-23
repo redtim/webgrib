@@ -312,7 +312,15 @@ async function main(): Promise<void> {
     'rgb(253,253,253)',
     'rgb(255,255,255)',
   ];
-  const windLayer = new WindyLayer({ id: 'hrrr-wind', opacity: 0.9, lineWidth: 1.6, colorScale: GREY_PARTICLES });
+  const windLayer = new WindyLayer({
+    id: 'hrrr-wind',
+    opacity: 0.9,
+    lineWidth: 1.6,
+    // Dark halo keeps the light trails readable over a bright fill at 100 % opacity.
+    haloColor: 'rgba(0, 0, 0, 0.45)',
+    haloWidth: 1,
+    colorScale: GREY_PARTICLES,
+  });
   const lightningLayer = new LightningLayer();
   const isobarLayer = new IsobarLayer();
   const client = new DecodeClient();

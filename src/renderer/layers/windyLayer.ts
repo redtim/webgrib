@@ -68,6 +68,13 @@ export interface WindyLayerOptions {
   particleAge?: number;
   /** Line width (CSS px) for a drawn particle trail. */
   lineWidth?: number;
+  /**
+   * Colour of a wider stroke drawn under each trail segment, giving light
+   * particles contrast over bright fills. Omit for no halo.
+   */
+  haloColor?: string;
+  /** Halo width (CSS px) added on each side of the trail. Default 1. */
+  haloWidth?: number;
   /** Particle-count scalar — multiplied against canvas area. */
   particleMultiplier?: number;
   /** Target frame rate for the particle animation. */
@@ -141,6 +148,8 @@ export class WindyLayer {
   private readonly velocityScale: number;
   private readonly particleAge: number;
   private readonly lineWidth: number;
+  private readonly haloColor: string | undefined;
+  private readonly haloWidth: number;
   private readonly particleMultiplier: number;
   private readonly frameRate: number;
   private readonly colorScale: string[] | undefined;
@@ -153,6 +162,8 @@ export class WindyLayer {
     this.velocityScale = opts.velocityScale ?? 0.005;
     this.particleAge = opts.particleAge ?? 90;
     this.lineWidth = opts.lineWidth ?? 1.2;
+    this.haloColor = opts.haloColor;
+    this.haloWidth = opts.haloWidth ?? 1;
     this.particleMultiplier = opts.particleMultiplier ?? 1 / 300;
     this.frameRate = opts.frameRate ?? 15;
     this.colorScale = opts.colorScale;
@@ -489,6 +500,8 @@ export class WindyLayer {
       velocityScale: this.motion?.velocityScale ?? this.velocityScale,
       particleAge: this.motion?.particleAge ?? this.particleAge,
       lineWidth: this.lineWidth,
+      haloColor: this.haloColor,
+      haloWidth: this.haloWidth,
       particleMultiplier: this.particleMultiplier,
       frameRate: this.motion?.frameRate ?? this.frameRate,
       colorScale: this.colorScale,
