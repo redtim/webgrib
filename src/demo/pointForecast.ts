@@ -89,9 +89,12 @@ export class PointForecast {
       }
 
       const hr = valid.getHours();
+      const min = valid.getMinutes();
       const th = document.createElement('th');
       th.className = 'forecast-hour';
-      th.textContent = `${hr % 12 === 0 ? 12 : hr % 12}${hr >= 12 ? 'pm' : 'am'}`;
+      th.textContent = min === 0
+        ? `${hr % 12 === 0 ? 12 : hr % 12}${hr >= 12 ? 'pm' : 'am'}`
+        : `:${String(min).padStart(2, '0')}`;
       th.addEventListener('click', () => this.onSelectHour(fhour));
       hourRow.appendChild(th);
       this.hourCells.set(fhour, th);

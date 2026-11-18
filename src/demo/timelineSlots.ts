@@ -4,15 +4,24 @@
  * so it can be unit tested.
  */
 
+import { rrfsHasHourlyOutput } from '../grib2/idx.js';
+
 export type DeterministicModel = 'hrrr' | 'rrfs';
 
 export interface TimelineSlot {
   cycle: string;
+  /** Forecast hour; a quarter hour (2.25, 2.5, 2.75) on a sub-hourly slot. */
   fhour: number;
   validMs: number;
 }
 
+/** Tick spacing in hours: hourly, or 15-minute through the sub-hourly range. */
+export type SlotStep = 1 | 0.25;
+
 const HOUR_MS = 3600000;
+
+/** Both models' sub-hourly files run f001-f018. */
+export const SUBHOURLY_MAX_FHOUR = 18;
 
 export function parseCycleUTC(cycle: string): Date {
   return new Date(Date.UTC(
@@ -37,6 +46,25 @@ const isSynoptic = (cycle: string): boolean => Number(cycle.slice(8, 10)) % 6 ==
 export function maxForecastHour(model: DeterministicModel, cycle: string): number {
   if (!isSynoptic(cycle)) return 18;
   return model === 'rrfs' ? 84 : 48;
+}
+
+/**
+ * True if a cycle has only sub-hourly output: RRFS cycles off the 3-hourly
+ * schedule. Such a cycle serves the sub-hourly fields alone and starts at f001.
+ */
+export function isSubhourlyOnly(model: DeterministicModel, cycle: string): boolean {
+  return model === 'rrfs' && !rrfsHasHourlyOutput(cycle);
+}
+
+/** True if a slot must be read from the model's sub-hourly file. */
+export function isSubhourlySlot(model: DeterministicModel, cycle: string, fhour: number): boolean {
+  return !Number.isInteger(fhour) || isSubhourlyOnly(model, cycle);
+}
+
+/** "t:3" for a whole hour, "t:2:15" for a quarter hour. */
+export function fhourLabel(fhour: number): string {
+  const minutes = Math.round(fhour * 60);
+  return minutes % 60 === 0 ? `t:${minutes / 60}` : `t:${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`;
 }
 
 /**
@@ -65,10 +93,18 @@ export function cycleSlots(cycle: string, fhours: readonly number[]): TimelineSl
   return fhours.map((fhour) => ({ cycle, fhour, validMs: cycleMs + fhour * HOUR_MS }));
 }
 
-/** Every hourly slot of one deterministic cycle. */
-export function deterministicSlots(model: DeterministicModel, cycle: string): TimelineSlot[] {
+/**
+ * Every slot of one deterministic cycle. With a 15-minute step, quarter hours
+ * are added through the sub-hourly range; later hours stay hourly. A
+ * sub-hourly-only cycle has no analysis file, so it starts at its first step.
+ */
+export function deterministicSlots(model: DeterministicModel, cycle: string, step: SlotStep = 1): TimelineSlot[] {
   const max = maxForecastHour(model, cycle);
-  return cycleSlots(cycle, Array.from({ length: max + 1 }, (_, h) => h));
+  const fhours: number[] = [];
+  for (let h = isSubhourlyOnly(model, cycle) ? step : 0; h <= max; h += h < SUBHOURLY_MAX_FHOUR ? step : 1) {
+    fhours.push(h);
+  }
+  return cycleSlots(cycle, fhours);
 }
 
 /**
@@ -76,12 +112,12 @@ export function deterministicSlots(model: DeterministicModel, cycle: string): Ti
  * from the newest cycle that reaches it. The newest cycle supplies its whole
  * run, then older, longer-running cycles extend it past its last hour.
  */
-export function blendedSlots(model: DeterministicModel, cycles: readonly string[]): TimelineSlot[] {
+export function blendedSlots(model: DeterministicModel, cycles: readonly string[], step: SlotStep = 1): TimelineSlot[] {
   const newestFirst = [...cycles].sort().reverse();
   const slots: TimelineSlot[] = [];
   for (const cycle of newestFirst) {
     const endMs = slots.length > 0 ? slots[slots.length - 1]!.validMs : -Infinity;
-    for (const slot of deterministicSlots(model, cycle)) {
+    for (const slot of deterministicSlots(model, cycle, step)) {
       if (slot.validMs > endMs) slots.push(slot);
     }
   }

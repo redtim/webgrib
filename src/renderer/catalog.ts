@@ -38,6 +38,12 @@ export interface VariableLevel {
   rrfsProduct?: RrfsProduct;
   /** RRFS query when its .idx encodes the record differently from HRRR. */
   rrfsQuery?: LayerQuery;
+  /**
+   * True if both models carry this level in their sub-hourly files (HRRR
+   * `wrfsubhf`, RRFS `2dfld.subh`), so it can be shown at 15-minute steps
+   * and from RRFS cycles that publish nothing else.
+   */
+  subhourly?: boolean;
 }
 
 /** A weather variable with one or more vertical levels. */
@@ -168,9 +174,17 @@ function windLevel(label: string, uParam: RegExp, vParam: RegExp, level: RegExp)
   };
 }
 
+/** Mark a level as present in both models' sub-hourly files. */
+const subh = (level: VariableLevel): VariableLevel => ({ ...level, subhourly: true });
+
 /** True if `variable` can be loaded from deterministic `model`. */
 export function isAvailableFor(variable: CatalogVariable, model: DeterministicModel): boolean {
   return !variable.models || variable.models.includes(model);
+}
+
+/** True if a level can be read from the sub-hourly files. */
+export function isSubhourly(level: VariableLevel | undefined): boolean {
+  return level?.subhourly === true;
 }
 
 // ---- catalog ----------------------------------------------------------------
@@ -181,7 +195,7 @@ export const CATALOG: CatalogVariable[] = [
     id: 'temperature', group: 'Temperature', label: 'Temperature', kind: 'scalar',
     colormap: 'temperature', range: [203, 320], dimension: 'temperature', format: fmtTemp,
     levels: [
-      scalarLevel('2m', /^TMP$/, /^2 m above ground$/),
+      subh(scalarLevel('2m', /^TMP$/, /^2 m above ground$/)),
       scalarLevel('850 hPa', /^TMP$/, /^850 mb$/),
       scalarLevel('700 hPa', /^TMP$/, /^700 mb$/),
       scalarLevel('500 hPa', /^TMP$/, /^500 mb$/),
@@ -199,8 +213,8 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'wind', group: 'Wind', label: 'Wind', kind: 'wind', range: [0, 18], dimension: 'speed',
     levels: [
-      windLevel('10m', /^UGRD$/, /^VGRD$/, /^10 m above ground$/),
-      windLevel('80m', /^UGRD$/, /^VGRD$/, /^80 m above ground$/),
+      subh(windLevel('10m', /^UGRD$/, /^VGRD$/, /^10 m above ground$/)),
+      subh(windLevel('80m', /^UGRD$/, /^VGRD$/, /^80 m above ground$/)),
       windLevel('850 hPa', /^UGRD$/, /^VGRD$/, /^850 mb$/),
       windLevel('700 hPa', /^UGRD$/, /^VGRD$/, /^700 mb$/),
       windLevel('500 hPa', /^UGRD$/, /^VGRD$/, /^500 mb$/),
@@ -211,7 +225,7 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'gust', group: 'Wind', label: 'Wind Gust', kind: 'scalar',
     colormap: 'wind', range: [0, 18], dimension: 'speed', format: fmtSpeed,
-    levels: [scalarLevel('Surface', /^GUST$/, /^surface$/)],
+    levels: [subh(scalarLevel('Surface', /^GUST$/, /^surface$/))],
   },
 
   // Moisture
@@ -219,7 +233,7 @@ export const CATALOG: CatalogVariable[] = [
     id: 'dewpoint', group: 'Moisture', label: 'Dew Point', kind: 'scalar',
     colormap: 'temperature', range: [203, 320], dimension: 'temperature', format: fmtTemp,
     levels: [
-      scalarLevel('2m', /^DPT$/, /^2 m above ground$/),
+      subh(scalarLevel('2m', /^DPT$/, /^2 m above ground$/)),
     ],
   },
   {
@@ -263,7 +277,7 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'prate', group: 'Precipitation', label: 'Precip Rate', kind: 'scalar',
     colormap: 'precipitation', range: [0, 0.01], dimension: 'none', unit: 'mm/hr', format: fmtPrecipRate,
-    levels: [scalarLevel('Surface', /^PRATE$/, /^surface$/)],
+    levels: [subh(scalarLevel('Surface', /^PRATE$/, /^surface$/))],
   },
   {
     id: 'snod', group: 'Precipitation', label: 'Snow Depth', kind: 'scalar',
@@ -280,12 +294,13 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'refc', group: 'Radar', label: 'Composite Reflectivity', kind: 'scalar',
     colormap: 'turbo', range: [-10, 75], dimension: 'none', unit: 'dBZ', format: fmtDbz,
-    levels: [scalarLevel('Entire atm', /^REFC$/, /entire atmosphere/)],
+    levels: [subh(scalarLevel('Entire atm', /^REFC$/, /entire atmosphere/))],
   },
   {
     id: 'retop', group: 'Radar', label: 'Echo Top', kind: 'scalar', models: ['hrrr'],
     colormap: 'viridis', range: [0, 20000], dimension: 'distance', format: fmtDistance,
-    levels: [scalarLevel('Cloud top', /^RETOP$/, /^cloud top$/)],
+    // HRRR-only, and HRRR's sub-hourly file carries it.
+    levels: [subh(scalarLevel('Cloud top', /^RETOP$/, /^cloud top$/))],
   },
 
   // Clouds
@@ -302,7 +317,7 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'vis', group: 'Clouds', label: 'Surface Visibility', kind: 'scalar',
     colormap: 'viridis', range: [0, 24000], dimension: 'distance', format: fmtDistance,
-    levels: [scalarLevel('Surface', /^VIS$/, /^surface$/)],
+    levels: [subh(scalarLevel('Surface', /^VIS$/, /^surface$/))],
   },
 
   // Lightning

@@ -144,10 +144,19 @@ export async function fetchMessageBytes(
  */
 /**
  * Build a forecast-time regex for .idx matching.
- * fhour 0 → /^anl$/, fhour N → /^N hour fcst$/
+ *
+ *   fhour 0    → /^anl$/
+ *   fhour N    → /^(N hour|60N min) fcst$/
+ *   fhour 2.25 → /^135 min fcst$/
+ *
+ * Whole hours accept the minute spelling too: HRRR's sub-hourly files label
+ * every step in minutes ("180 min fcst"), RRFS's in hours ("3 hour fcst").
  */
 export function forecastQuery(fhour: number): RegExp {
-  return fhour === 0 ? /^anl$/ : new RegExp(`^${fhour} hour fcst$`);
+  if (fhour === 0) return /^anl$/;
+  const minutes = Math.round(fhour * 60);
+  if (minutes % 60 !== 0) return new RegExp(`^${minutes} min fcst$`);
+  return new RegExp(`^(${minutes / 60} hour|${minutes} min) fcst$`);
 }
 
 /** Forecast regex for 1-hour accumulated fields (APCP, etc.). */
@@ -157,7 +166,14 @@ export function accForecastQuery(fhour: number): RegExp {
   return new RegExp(`^${fhour - 1}-${fhour} hour acc fcst$`);
 }
 
-export function hrrrUrls(cycle: string, fhour: number, product: 'wrfsfcf' | 'wrfprsf' | 'wrfnatf' | 'wrfsubhf' = 'wrfsfcf'): { data: string; idx: string } {
+export type HrrrProduct = 'wrfsfcf' | 'wrfprsf' | 'wrfnatf' | 'wrfsubhf';
+
+/**
+ * `fhour` may be a quarter hour (2.25, 2.5, 2.75) when `product` is the
+ * sub-hourly `wrfsubhf`: file fNN holds the 15-minute steps ending at hour NN.
+ */
+export function hrrrUrls(cycle: string, fhour: number, product: HrrrProduct = 'wrfsfcf'): { data: string; idx: string } {
+  fhour = Math.ceil(fhour);
   const yyyy = cycle.slice(0, 4);
   const mm = cycle.slice(4, 6);
   const dd = cycle.slice(6, 8);
@@ -179,14 +195,28 @@ export function hrrrUrls(cycle: string, fhour: number, product: 'wrfsfcf' | 'wrf
  * The bucket sends CORS headers like the HRRR one, so no proxy is needed.
  * (The older `noaa-rrfs-pds` bucket holds only retrospective and prototype
  * runs.)
+ *
+ * Hourly output is published only for cycles at 00/03/06/.../21z. Every
+ * cycle also has a sub-hourly file per forecast hour (f001-f018),
+ *
+ *   rrfs.tHHz.2dfld.3km.subh.fFFF.conus.grib2
+ *
+ * holding a reduced set of surface fields at 15-minute steps; `fhour` may be
+ * a quarter hour when `product` is `subh`.
  */
-export type RrfsProduct = '2dfld' | 'prslev';
+export type RrfsProduct = '2dfld' | 'prslev' | 'subh';
 
 export function rrfsUrls(cycle: string, fhour: number, product: RrfsProduct = '2dfld'): { data: string; idx: string } {
   const hh = cycle.slice(8, 10);
-  const fh = String(fhour).padStart(3, '0');
-  const base = `https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.${cycle.slice(0, 8)}/${hh}/rrfs.t${hh}z.${product}.3km.f${fh}.conus.grib2`;
+  const fh = String(Math.ceil(fhour)).padStart(3, '0');
+  const file = product === 'subh' ? '2dfld.3km.subh' : `${product}.3km`;
+  const base = `https://noaa-rrfs-ops-pds.s3.amazonaws.com/rrfs.${cycle.slice(0, 8)}/${hh}/rrfs.t${hh}z.${file}.f${fh}.conus.grib2`;
   return { data: base, idx: base + '.idx' };
+}
+
+/** True if an RRFS cycle publishes hourly 2dfld/prslev output (00/03/.../21z). */
+export function rrfsHasHourlyOutput(cycle: string): boolean {
+  return Number(cycle.slice(8, 10)) % 3 === 0;
 }
 
 /** Max forecast hour for an RRFS cycle: 84 h at 00/06/12/18z, 18 h otherwise. */

@@ -5,16 +5,17 @@
  *
  * Each tick is a slot: a forecast hour of a specific cycle. The default
  * "Latest" run blends cycles so the bar covers every hour on offer, rather
- * than stopping at the 18 h that most hourly cycles run to.
+ * than stopping at the 18 h that most hourly cycles run to. A "15 min" toggle
+ * adds quarter-hour ticks through the sub-hourly range (f001-f018).
  */
 
 import {
   blendedSlots, cycleSlots, deterministicSlots, maxForecastHour, nearestSlotIndex, recentCycles,
-  formatCycle,
+  formatCycle, fhourLabel, isSubhourlyOnly,
 } from './timelineSlots.js';
-import type { DeterministicModel, TimelineSlot } from './timelineSlots.js';
+import type { DeterministicModel, SlotStep, TimelineSlot } from './timelineSlots.js';
 
-export type { DeterministicModel, TimelineSlot };
+export type { DeterministicModel, SlotStep, TimelineSlot };
 
 export interface TimelineOptions {
   parent: HTMLElement;
@@ -51,6 +52,7 @@ export class Timeline {
   private tickContainer: HTMLElement;
   private validLabel: HTMLElement;
   private playBtn: HTMLButtonElement;
+  private stepBtn: HTMLButtonElement;
   private playing = false;
   private pending: Promise<void> = Promise.resolve();
   /** Selected run: a cycle, or LATEST for the blend of available cycles. */
@@ -63,6 +65,8 @@ export class Timeline {
   private _index = 0;
   private _source: TimelineSource = 'hrrr';
   private _model: DeterministicModel = 'hrrr';
+  /** Tick spacing for deterministic sources. */
+  private _step: SlotStep = 1;
   private _gefsFhours: number[] | null = null;
   private onChange: TimelineOptions['onChange'];
   private probeCycle: TimelineOptions['probeCycle'];
@@ -116,6 +120,11 @@ export class Timeline {
     nowBtn.textContent = 'Now';
     nowBtn.title = 'Jump to the current time';
     nowBtn.addEventListener('click', () => this.selectNow());
+    this.stepBtn = document.createElement('button');
+    this.stepBtn.className = 'timeline-btn timeline-step';
+    this.stepBtn.textContent = '15 min';
+    this.stepBtn.addEventListener('click', () => this.setStep(this._step === 1 ? 0.25 : 1));
+    this.updateStepBtn();
 
     const chips = document.createElement('div');
     chips.className = 'timeline-models';
@@ -130,7 +139,7 @@ export class Timeline {
     }
     this.updateModelChips();
 
-    cycleRow.append(this.playBtn, cycleLabel, this.modelSelect, this.cycleSelect, this.validLabel, nowBtn, chips);
+    cycleRow.append(this.playBtn, cycleLabel, this.modelSelect, this.cycleSelect, this.validLabel, nowBtn, this.stepBtn, chips);
 
     // Scrollable container for day labels + ticks (scroll together)
     const scrollWrap = document.createElement('div');
@@ -179,10 +188,32 @@ export class Timeline {
     }
     this.modelSelect.disabled = source === 'gefs';
     this.updateModelChips();
+    this.updateStepBtn();
 
     this.populateCycles();
     this.rebuild(prevValidMs, true);
     this.probeCycles();
+  }
+
+  /** Tick spacing: hourly, or 15-minute through the sub-hourly range. */
+  get step(): SlotStep { return this._step; }
+
+  /** Switch tick spacing, keeping the valid time. GEFS is always 3-hourly. */
+  setStep(step: SlotStep): void {
+    if (step === this._step) return;
+    this._step = step;
+    this.updateStepBtn();
+    if (this._source === 'gefs') return;
+    this.rebuild(this.validDate().getTime());
+  }
+
+  private updateStepBtn(): void {
+    const on = this._step !== 1;
+    this.stepBtn.classList.toggle('active', on);
+    this.stepBtn.disabled = this._source === 'gefs';
+    this.stepBtn.title = on
+      ? 'Showing 15-minute steps through the first 18 hours; click for hourly'
+      : 'Show 15-minute steps through the first 18 hours (surface fields only)';
   }
 
   /**
@@ -222,7 +253,7 @@ export class Timeline {
   private populateCycles(): void {
     this._cycles = this._source === 'gefs'
       ? gefsRecentCyclesLocal(4)
-      // The RRFS parallel feed occasionally skips cycles, so offer a few more.
+      // Two of every three RRFS cycles are sub-hourly only, so offer a few more.
       : recentCycles(this._source === 'rrfs' ? 8 : 6, Date.now());
     this._available = null;
     this.cycleSelect.innerHTML = '';
@@ -237,6 +268,10 @@ export class Timeline {
       const opt = document.createElement('option');
       opt.value = c;
       opt.textContent = `${c.slice(0, 4)}-${c.slice(4, 6)}-${c.slice(6, 8)} ${c.slice(8, 10)}Z`;
+      if (this._source !== 'gefs' && isSubhourlyOnly(this._source, c)) {
+        opt.textContent += ' (sub-hourly fields)';
+        opt.title = 'This run publishes only the sub-hourly surface fields, to 18 hours';
+      }
       this.cycleSelect.appendChild(opt);
     }
     this._run = this._source === 'gefs' ? this._cycles[0] ?? '' : LATEST;
@@ -277,10 +312,13 @@ export class Timeline {
     if (this._source === 'gefs') {
       this._slots = cycleSlots(this._run, this._gefsFhours ?? []);
     } else if (this._run === LATEST) {
-      const cycles = this._cycles.filter((c) => this._available?.has(c) ?? true);
-      this._slots = blendedSlots(this._source, cycles);
+      // Sub-hourly-only cycles would limit the blend to their few fields, so
+      // they are offered on their own in the dropdown instead.
+      const model = this._source;
+      const cycles = this._cycles.filter((c) => (this._available?.has(c) ?? true) && !isSubhourlyOnly(model, c));
+      this._slots = blendedSlots(model, cycles, this._step);
     } else {
-      this._slots = deterministicSlots(this._source, this._run);
+      this._slots = deterministicSlots(this._source, this._run, this._step);
     }
     this.renderTicks();
   }
@@ -318,20 +356,24 @@ export class Timeline {
       const valid = new Date(slot.validMs);
       const dayKey = `${valid.getDay()}-${valid.getDate()}`;
       const hr = valid.getHours();
+      const min = valid.getMinutes();
       const ampm = hr >= 12 ? 'p' : 'a';
       const h12 = hr === 0 ? 12 : hr > 12 ? hr - 12 : hr;
 
       const tick = document.createElement('button');
       tick.className = 'timeline-tick';
       tick.dataset.hour = String(h);
-      const when = `${DAYS[valid.getDay()]!} ${h12}${ampm === 'p' ? 'pm' : 'am'}`;
+      const clock = min === 0 ? `${h12}${ampm === 'p' ? 'pm' : 'am'}` : `${h12}:${String(min).padStart(2, '0')}${ampm === 'p' ? 'pm' : 'am'}`;
+      const when = `${DAYS[valid.getDay()]!} ${clock}`;
       if (this._source === 'gefs') {
         // For long-range forecasts show day+hour for clarity
         tick.textContent = h <= 48 ? `${h12}${ampm}` : `d${Math.floor(h / 24)}`;
         tick.title = `f${String(h).padStart(3, '0')} ${when}`;
       } else {
-        tick.textContent = `${h12}${ampm}`;
-        tick.title = blended ? `t:${h} ${when} (${slot.cycle.slice(8, 10)}Z run)` : `t:${h} ${when}`;
+        // Quarter-hour ticks show just the minutes, under their hour.
+        if (min !== 0) tick.classList.add('quarter');
+        tick.textContent = min === 0 ? `${h12}${ampm}` : `:${min}`;
+        tick.title = blended ? `${fhourLabel(h)} ${when} (${slot.cycle.slice(8, 10)}Z run)` : `${fhourLabel(h)} ${when}`;
       }
       tick.addEventListener('click', () => this.selectIndex(index));
       this.tickContainer.appendChild(tick);
@@ -434,11 +476,13 @@ export class Timeline {
     const valid = this.validDate();
     const day = DAYS[valid.getDay()]!;
     const hour = valid.getHours();
+    const min = valid.getMinutes();
     const ampm = hour >= 12 ? 'pm' : 'am';
     const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+    const clock = min === 0 ? `${h12}${ampm}` : `${h12}:${String(min).padStart(2, '0')}${ampm}`;
     const mon = valid.getMonth() + 1;
     const date = valid.getDate();
-    this.validLabel.innerHTML = `<span class="timeline-run">Valid: </span>${day} ${h12}${ampm} ${mon}/${date}`;
+    this.validLabel.innerHTML = `<span class="timeline-run">Valid: </span>${day} ${clock} ${mon}/${date}`;
   }
 }
 

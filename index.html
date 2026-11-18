@@ -110,12 +110,16 @@
       }
       .timeline-tick:hover { background: #21262d; color: #e6edf3; }
       .timeline-tick.active { background: #1f6feb; color: #fff; border-color: #388bfd; }
+      .timeline-tick.quarter { color: #6e7681; min-width: 16px; padding: 2px 2px; }
+      .timeline-tick.quarter.active { color: #fff; }
       .timeline-btn {
         background: #161b22; border: 1px solid #30363d; border-radius: 3px;
         color: #e6edf3; font-size: 11px; font-family: inherit;
         padding: 2px 8px; cursor: pointer;
       }
       .timeline-btn:hover { background: #21262d; }
+      .timeline-btn.active { background: #1f6feb; color: #fff; border-color: #388bfd; }
+      .timeline-btn:disabled { opacity: 0.5; cursor: default; }
 
       /* Model chips replace the model dropdown in easy mode */
       .timeline-models { display: none; }

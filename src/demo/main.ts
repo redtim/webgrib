@@ -11,9 +11,10 @@
 import maplibregl from 'maplibre-gl';
 import { ScalarFieldLayer, WindyLayer, LightningLayer, IsobarLayer } from '../renderer/index.js';
 import { hrrrUrls, rrfsUrls, forecastQuery, gefsUrls, gefsStatsUrls, GEFS_FHOURS } from '../grib2/idx.js';
+import { fhourLabel, isSubhourlySlot, isSubhourlyOnly } from './timelineSlots.js';
 import type { LatLonGrid, GridDefinition, LambertConformalGrid } from '../grib2/types.js';
 import { DecodeClient } from '../worker/client.js';
-import { CATALOG, findVariable, displayRange, displayUnit, isAvailableFor } from '../renderer/catalog.js';
+import { CATALOG, findVariable, displayRange, displayUnit, isAvailableFor, isSubhourly } from '../renderer/catalog.js';
 import type { CatalogVariable, VariableLevel, DeterministicModel, LayerQuery } from '../renderer/catalog.js';
 import { fetchSfbofsSurface, fetchSfbofsWaterLevel, latestCycle as sfbofsLatestCycle, SFBOFS_MAX_FHOUR } from '../ofs/sfbofs.js';
 import { computeWaterDepth } from '../bathymetry/waterDepth.js';
@@ -109,12 +110,25 @@ const MODEL_NAMES: Record<DeterministicModel, string> = { hrrr: 'HRRR', rrfs: 'R
 
 /**
  * .idx URL for a deterministic-model level. HRRR keeps everything in one
- * wrfsfc file; RRFS splits isobaric levels into prslev.
+ * wrfsfc file; RRFS splits isobaric levels into prslev. Quarter-hour slots,
+ * and every slot of an RRFS cycle without hourly output, come from the
+ * model's sub-hourly file.
  */
 function deterministicIdxUrl(model: DeterministicModel, cycle: string, fhour: number, level?: VariableLevel): string {
+  if (isSubhourlySlot(model, cycle, fhour)) {
+    return model === 'rrfs' ? rrfsUrls(cycle, fhour, 'subh').idx : hrrrUrls(cycle, fhour, 'wrfsubhf').idx;
+  }
   return model === 'rrfs'
     ? rrfsUrls(cycle, fhour, level?.rrfsProduct).idx
     : hrrrUrls(cycle, fhour).idx;
+}
+
+/** Why a level cannot be shown at a sub-hourly slot, or null if it can. */
+function subhourlyGap(model: DeterministicModel, cycle: string, fhour: number, level: VariableLevel, name: string): string | null {
+  if (!isSubhourlySlot(model, cycle, fhour) || isSubhourly(level)) return null;
+  return isSubhourlyOnly(model, cycle)
+    ? `${name} is not in the ${MODEL_NAMES[model]} sub-hourly files; this run has no hourly output (choose a 00/03/06...Z run)`
+    : `${name} is published hourly only; pick an on-the-hour step`;
 }
 
 /** Per-model scalar query — RRFS encodes a few records differently. */
@@ -227,13 +241,15 @@ function colormapCss(name: ColormapName, value: number, range: [number, number])
 }
 
 /** Compact UTC hour stamp (YYYYMMDDHH), the same shape as a model cycle. */
+/** YYYYMMDDHH, with minutes appended (YYYYMMDDHHMM) off the hour. */
 function formatUtcHour(d: Date): string {
-  return d.toISOString().slice(0, 13).replace(/[-T]/g, '');
+  const hour = d.toISOString().slice(0, 13).replace(/[-T]/g, '');
+  return d.getUTCMinutes() === 0 ? hour : hour + String(d.getUTCMinutes()).padStart(2, '0');
 }
 
 function parseUtcHour(s: string | null): number | null {
-  if (!s || !/^\d{10}$/.test(s)) return null;
-  return Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(8, 10));
+  if (!s || !/^\d{10}(\d{2})?$/.test(s)) return null;
+  return Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8), +s.slice(8, 10), +(s.slice(10, 12) || 0));
 }
 
 async function main(): Promise<void> {
@@ -624,6 +640,12 @@ async function main(): Promise<void> {
 
     try {
       if (timeline.source !== 'gefs') {
+        // HRRR's sub-hourly file carries no MSLP; RRFS's has MSLET.
+        if (timeline.model === 'hrrr' && isSubhourlySlot('hrrr', cycle, fhour)) {
+          isobarSource = null;
+          isobarLayer.setVisible(false);
+          return;
+        }
         // HRRR names it MSLMA; accept the other common MSLP names for RRFS.
         const query = { parameter: /^(MSLMA|MSLET|PRMSL)$/, level: /^mean sea level$/, forecast: fcRe };
         const result = await client.decode(deterministicIdxUrl(timeline.model, cycle, fhour), query);
@@ -832,6 +854,14 @@ async function main(): Promise<void> {
       hideFillParticles();
       legend.hide();
       setStatus(`${displayName} is not published by ${modelName}`, true);
+      return;
+    }
+    const gap = subhourlyGap(model, cycle, fhour, level, displayName);
+    if (gap) {
+      scalarLayer.setVisible(false);
+      hideFillParticles();
+      legend.hide();
+      setStatus(gap, true);
       return;
     }
     setStatus(`fetching ${modelName} ${displayName}...`);
@@ -1200,7 +1230,7 @@ async function main(): Promise<void> {
       );
     }
 
-    setStatus(`${displayName} loaded (${MODEL_NAMES[model]} t${timeline.cycle.slice(8)}z f${String(timeline.fhour).padStart(2, '0')} + SFBOFS t${String(ofsCycle).padStart(2, '0')}z f${String(ofsFhour).padStart(3, '0')})`);
+    setStatus(`${displayName} loaded (${MODEL_NAMES[model]} t${timeline.cycle.slice(8)}z ${fhourLabel(timeline.fhour)} + SFBOFS t${String(ofsCycle).padStart(2, '0')}z f${String(ofsFhour).padStart(3, '0')})`);
   }
 
   // ---- load GEFS variable ----------------------------------------------------
@@ -1471,20 +1501,23 @@ async function main(): Promise<void> {
   interface ForecastRow {
     label: string;
     idxUrl: (cycle: string, fhour: number) => string;
-    /** Null where the layer has no record for that hour. */
-    queries: (fhour: number) => IdxQuery[] | null;
+    /** Null where the layer has no record for that slot. */
+    queries: (cycle: string, fhour: number) => IdxQuery[] | null;
     cell: (values: number[], convergence: number) => ForecastCell | null;
   }
 
-  function windForecastRow(label: string, u: LayerQuery, v: LayerQuery, level?: VariableLevel): ForecastRow {
+  /** 10 m wind is in both models' sub-hourly files; other levels say so themselves. */
+  const AT_10M: VariableLevel = { label: '10m', subhourly: true };
+
+  function windForecastRow(label: string, u: LayerQuery, v: LayerQuery, level: VariableLevel = AT_10M): ForecastRow {
     const model = timeline.model;
     return {
       label,
       idxUrl: (cycle, fhour) => deterministicIdxUrl(model, cycle, fhour, level),
-      queries: (fhour) => [
+      queries: (cycle, fhour) => (subhourlyGap(model, cycle, fhour, level, label) ? null : [
         { parameter: u.parameter, level: u.level, forecast: forecastQuery(fhour) },
         { parameter: v.parameter, level: v.level, forecast: forecastQuery(fhour) },
-      ],
+      ]),
       cell: ([gu, gv], convergence) => {
         if (!Number.isFinite(gu) || !Number.isFinite(gv)) return null;
         // Grid-relative to true-north, as in resampleLccToLatLon.
@@ -1517,7 +1550,7 @@ async function main(): Promise<void> {
           label: name,
           idxUrl: (cycle, fhour) => deterministicIdxUrl(model, cycle, fhour, level),
           // Accumulated / windowed fields have no record at the analysis hour.
-          queries: (fhour) => (query.forecast && fhour === 0 ? null : [{
+          queries: (cycle, fhour) => ((query.forecast && fhour === 0) || subhourlyGap(model, cycle, fhour, level, name) ? null : [{
             parameter: query.parameter,
             level: query.level,
             forecast: query.forecast?.(fhour) ?? forecastQuery(fhour),
@@ -1541,9 +1574,10 @@ async function main(): Promise<void> {
       rows.push({
         label: 'Pressure',
         idxUrl: (cycle, fhour) => deterministicIdxUrl(model, cycle, fhour),
-        queries: (fhour) => [{
+        // HRRR's sub-hourly file carries no MSLP.
+        queries: (cycle, fhour) => (model === 'hrrr' && isSubhourlySlot(model, cycle, fhour) ? null : [{
           parameter: /^(MSLMA|MSLET|PRMSL)$/, level: /^mean sea level$/, forecast: forecastQuery(fhour),
-        }],
+        }]),
         cell: ([p]) => (Number.isFinite(p) ? { text: `${(p! / 100).toFixed(0)} hPa` } : null),
       });
     }
@@ -1577,14 +1611,14 @@ async function main(): Promise<void> {
     const worker = async (): Promise<void> => {
       while (next < tasks.length && gen === forecastGen) {
         const { cycle, fhour, row, rowIndex } = tasks[next++]!;
-        const queries = row.queries(fhour);
+        const queries = row.queries(cycle, fhour);
         let cell: ForecastCell | null = null;
         if (queries) {
           try {
             const s = await client.samplePoint(row.idxUrl(cycle, fhour), queries, lng, lat);
             cell = row.cell(s.values, s.convergence);
           } catch (err) {
-            console.warn(`Point forecast: ${row.label} f${fhour} failed:`, err);
+            console.warn(`Point forecast: ${row.label} ${fhourLabel(fhour)} failed:`, err);
           }
         }
         if (gen !== forecastGen) return;
