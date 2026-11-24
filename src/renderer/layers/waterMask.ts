@@ -93,6 +93,23 @@ export class WaterMask {
   }
 
   /**
+   * True if a lon/lat point lies on water, tested against the full-resolution
+   * rings (even-odd, so holes count as land). Independent of any view, unlike
+   * `rasterizeScreen`.
+   */
+  contains(lon: number, lat: number): boolean {
+    for (const poly of this.polygons) {
+      if (!inBbox(poly.bbox, lon, lat)) continue;
+      let inside = false;
+      for (const r of poly.rings) {
+        if (inBbox(r.bbox, lon, lat) && ringContains(r.ring, lon, lat)) inside = !inside;
+      }
+      if (inside) return true;
+    }
+    return false;
+  }
+
+  /**
    * Rasterize the mask in screen space. Returns one byte per CSS pixel
    * (255 = water) plus the dimensions, or null if the viewport doesn't touch
    * the mask at all (caller should treat everything as unmasked).
@@ -356,4 +373,19 @@ function decimate(ring: Ring, tol: number): Ring {
   }
   out.push(ring[ring.length - 1]!);
   return out.length >= 4 ? out : ring;
+}
+
+function inBbox(b: [number, number, number, number], lon: number, lat: number): boolean {
+  return lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3];
+}
+
+/** Ray-casting point-in-ring test. */
+function ringContains(ring: Ring, lon: number, lat: number): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i]![0]!, yi = ring[i]![1]!;
+    const xj = ring[j]![0]!, yj = ring[j]![1]!;
+    if ((yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
 }

@@ -139,8 +139,6 @@ export class WindyLayer {
   // doesn't touch the mask.
   private waterMask: WaterMask | null = null;
   private screenMask: Uint8Array | null = null;
-  private screenMaskW = 0;
-  private screenMaskH = 0;
 
   // Snapshot of user-provided options; we only read them when (re)starting.
   private readonly minVelocity: number;
@@ -343,15 +341,18 @@ export class WindyLayer {
     if (this.map && this.visible && this.currentData) this.start();
   }
 
-  /** True if a geographic point is on water per the current screen mask (or no mask is set). */
+  /**
+   * True if a geographic point is on water per the shoreline mask (or no mask
+   * is set, or the point is outside the mask's coverage). Tests the polygon
+   * directly: the screen raster is only rebuilt when particles restart, so it
+   * goes stale once the view moves while particles are hidden.
+   */
   isWaterAt(lonDeg: number, latDeg: number): boolean {
-    if (!this.waterMask || !this.map) return true;
-    if (!this.screenMask) return true;
-    const p = this.map.project([lonDeg, latDeg]);
-    const x = Math.round(p.x);
-    const y = Math.round(p.y);
-    if (x < 0 || y < 0 || x >= this.screenMaskW || y >= this.screenMaskH) return true;
-    return this.screenMask[y * this.screenMaskW + x]! > 127;
+    const mask = this.waterMask;
+    if (!mask) return true;
+    const [w, s, e, n] = mask.bbox;
+    if (lonDeg < w || lonDeg > e || latDeg < s || latDeg > n) return true;
+    return mask.contains(lonDeg, latDeg);
   }
 
   /**
@@ -467,8 +468,6 @@ export class WindyLayer {
         { west: mb.getWest(), south: mb.getSouth(), east: mb.getEast(), north: mb.getNorth() },
         map.getZoom(),
       );
-      this.screenMaskW = width;
-      this.screenMaskH = height;
     }
     const screenMask = this.screenMask;
     const isWater = screenMask
