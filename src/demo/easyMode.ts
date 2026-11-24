@@ -61,6 +61,7 @@ export const EASY_OVERLAYS: EasyOverlay[] = [
   { id: 'waterlevels', label: 'Water level stations', glyph: 'W', background: '#1f2d3d', color: '#58a6ff' },
   { id: 'tidepredictions', label: 'Tide stations', glyph: 'T', background: '#1f3d2e', color: '#7ee787' },
   { id: 'currentpredictions', label: 'Current stations', glyph: 'C', background: '#2d1f3d', color: '#d2a8ff' },
+  { id: 'wavebuoys', label: 'Wave buoys', glyph: '≋', background: '#1f3d3a', color: '#4fd1c5' },
 ];
 
 /** Plain-language label for a variable, falling back to its catalog label. */

@@ -34,6 +34,7 @@ import { Legend } from './legend.js';
 import type { LegendTick } from './legend.js';
 import { LevelSlider } from './levelSlider.js';
 import { TideStationManager } from './tides.js';
+import { WaveBuoyManager, WAVE_BUOY_OVERLAY_ID } from './waveBuoys.js';
 import { EasyUI, getUiMode, easyLabel } from './easyMode.js';
 import { PointForecast } from './pointForecast.js';
 import type { ForecastCell } from './pointForecast.js';
@@ -345,6 +346,7 @@ async function main(): Promise<void> {
   let loadGen = 0;
   let lastFitVariable: string | null = null; // track which variable we last zoomed to
   let tideManager: TideStationManager | null = null;
+  let waveBuoys: WaveBuoyManager | null = null;
   let gefsMember: GefsMemberChoice = 'mean';
   let isobarsEnabled = false;
   // Wind particles drawn over a fill that has no particles of its own.
@@ -476,6 +478,8 @@ async function main(): Promise<void> {
 
   tideManager = new TideStationManager();
   tideManager.attach(map);
+  waveBuoys = new WaveBuoyManager(document.body);
+  waveBuoys.attach(map);
 
   // Coastline stroke
   map.addLayer(
@@ -681,6 +685,10 @@ async function main(): Promise<void> {
   for (const box of layersWrap.querySelectorAll<HTMLInputElement>('input[data-tide-type]')) {
     registerOverlay(box.dataset.tideType!, box);
   }
+
+  // ---- NDBC wave buoy toggle ----------------------------------------------------
+
+  registerOverlay(WAVE_BUOY_OVERLAY_ID, waveBuoys.createToggle(layersWrap));
 
   // ---- unit preference selectors ---------------------------------------------
 
@@ -1453,6 +1461,8 @@ async function main(): Promise<void> {
     showPopup(new maplibregl.LngLat(lngLat.lng, lngLat.lat), html));
 
   map.on('click', (ev) => {
+    // Wave buoys open their own spectrum panel instead of the inspect popup.
+    if (waveBuoys.handleClick(ev, map)) return;
     // Check tide station layers first — they handle their own popup
     if (tideManager.handleClick(ev, map, (lngLat, html) => showPopup(new maplibregl.LngLat(lngLat.lng, lngLat.lat), html))) {
       return;

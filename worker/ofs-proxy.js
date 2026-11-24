@@ -1,10 +1,11 @@
 /**
  * Cloudflare Worker — CORS proxy for NOAA OPeNDAP / THREDDS and S3.
  *
- * Supports three upstream backends:
+ * Supports four upstream backends:
  *   /thredds/...  → opendap.co-ops.nos.noaa.gov (OPeNDAP)
  *   /s3/...       → noaa-nos-ofs-pds.s3.amazonaws.com (S3, with Range support)
  *   /nomads/...   → nomads.ncep.noaa.gov (RRFS GRIB2 + .idx, with Range support)
+ *   /ndbc/...     → www.ndbc.noaa.gov (buoy spectral wave files, with Range support)
  *
  * NOMADS responses are cached in R2 (see cachedFetch) so that each .idx and
  * each message byte range reaches NOMADS once rather than once per viewer:
@@ -22,13 +23,18 @@ const UPSTREAMS = {
   '/thredds/': 'https://opendap.co-ops.nos.noaa.gov',
   '/s3/': 'https://noaa-nos-ofs-pds.s3.amazonaws.com',
   '/nomads/': 'https://nomads.ncep.noaa.gov',
+  '/ndbc/': 'https://www.ndbc.noaa.gov',
 };
 
 // Prefixes whose proxy path segment is not part of the upstream path.
-const STRIP_PREFIX = new Set(['/s3/', '/nomads/']);
+const STRIP_PREFIX = new Set(['/s3/', '/nomads/', '/ndbc/']);
 
 // Only RRFS is exposed from NOMADS — don't turn the worker into an open proxy.
 const NOMADS_ALLOWED = /^\/pub\/data\/nccf\/com\/rrfs\/(para|prod)\/rrfs\.\d{8}\/\d{2}\/[\w.]+$/;
+
+// NDBC: the realtime2 directory listing (which buoys publish spectra), the
+// active-station metadata, and the five per-buoy spectral wave files.
+const NDBC_ALLOWED = /^\/(activestations\.xml|data\/realtime2\/([A-Za-z0-9]{1,10}\.(data_spec|swdir|swdir2|swr1|swr2))?)$/;
 
 // NOMADS answers with "Cache-Control: no-cache, private, max-age=14400", but
 // that is a blanket Apache setting: a published GRIB2 file and its .idx are
@@ -39,6 +45,7 @@ const NOMADS_ALLOWED = /^\/pub\/data\/nccf\/com\/rrfs\/(para|prod)\/rrfs\.\d{8}\
 const ALLOWED_ORIGINS = [
   'https://redtim.github.io',
   'http://localhost:5173',
+  'http://localhost:5174',
   'http://localhost:4173',
 ];
 
@@ -90,6 +97,9 @@ export default {
         if (prefix === '/nomads/' && !NOMADS_ALLOWED.test(strippedPath)) {
           return new Response('Not found', { status: 404 });
         }
+        if (prefix === '/ndbc/' && !NDBC_ALLOWED.test(strippedPath)) {
+          return new Response('Not found', { status: 404 });
+        }
         break;
       }
     }
@@ -109,6 +119,10 @@ export default {
       const rangeHeader = request.headers.get('Range');
       if (rangeHeader) {
         fetchHeaders['Range'] = rangeHeader;
+        // NDBC ignores Range when it can gzip the whole file instead, so ask
+        // for the bytes uncompressed. The realtime2 files are newest-first,
+        // so a leading range is the most recent few days.
+        if (upstream === UPSTREAMS['/ndbc/']) fetchHeaders['Accept-Encoding'] = 'identity';
       }
 
       const upstreamResp = upstream === UPSTREAMS['/nomads/']

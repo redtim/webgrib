@@ -242,6 +242,66 @@
       .tide-sparkline { margin-top: 4px; border-radius: 2px; background: rgba(22, 27, 34, 0.6); }
       .tide-loading { color: #8b949e; font-style: italic; padding: 4px 0; }
 
+      /* ---- wave buoy hover + spectrum panel ---- */
+      .wave-hover .maplibregl-popup-content {
+        padding: 3px 8px; font-size: 11px; pointer-events: none;
+      }
+      .wave-hover-id { color: #4fd1c5; font-weight: bold; }
+      #spectrum-panel {
+        position: absolute; z-index: 10; right: 12px; top: 52px;
+        width: 360px; max-width: calc(100vw - 24px); box-sizing: border-box;
+        max-height: calc(100vh - 52px - 10vh - 110px); overflow-y: auto;
+        scrollbar-width: thin; scrollbar-color: #30363d transparent;
+        background: rgba(22, 27, 34, 0.94); color: #e6edf3;
+        border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px 10px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+      }
+      :root[data-mode="easy"] #spectrum-panel {
+        top: auto; right: auto; left: 12px; bottom: 124px;
+        max-height: calc(100vh - 320px);
+        border: none; border-radius: 12px;
+        font: 12px system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      .spectrum-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+      .spectrum-title { font-weight: 600; font-size: 13px; color: #4fd1c5; }
+      .spectrum-subtitle { color: #8b949e; font-size: 10px; }
+      .spectrum-close {
+        background: none; border: none; color: #8b949e; font-size: 18px;
+        line-height: 1; cursor: pointer; padding: 0 2px;
+      }
+      .spectrum-close:hover { color: #fff; }
+      .spectrum-message { color: #8b949e; padding: 10px 0 4px; }
+      .spectrum-message:empty { display: none; }
+      .spectrum-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+      .spectrum-slider { flex: 1; min-width: 0; accent-color: #4fd1c5; margin: 0; }
+      .spectrum-time { color: #e6edf3; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .spectrum-controls { justify-content: space-between; }
+      .spectrum-hs { font-weight: 600; color: #e6edf3; flex: 1; }
+      .spectrum-controls select {
+        background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 3px;
+        font: inherit; font-size: 10px; padding: 2px 4px;
+      }
+      #spectrum-panel canvas { display: block; margin: 6px auto 0; max-width: 100%; }
+      .spectrum-legend { color: #8b949e; font-size: 10px; text-align: center; margin-top: 2px; }
+      .spectrum-table { width: 100%; border-collapse: collapse; margin-top: 6px; font-variant-numeric: tabular-nums; }
+      .spectrum-table th {
+        color: #8b949e; font-weight: 500; text-align: left; padding: 2px 4px;
+        border-bottom: 1px solid #30363d;
+      }
+      .spectrum-table td { padding: 3px 4px; white-space: nowrap; }
+      .spectrum-muted { color: #8b949e; }
+      .spectrum-foot { margin-top: 6px; font-size: 10px; }
+      .spectrum-foot a { color: #58a6ff; text-decoration: none; }
+      .spectrum-foot a:hover { text-decoration: underline; }
+      .spectrum-tooltip {
+        display: none; position: absolute; z-index: 2; pointer-events: none;
+        background: rgba(11, 13, 16, 0.95); color: #8b949e;
+        border: 1px solid #30363d; border-radius: 4px; padding: 5px 8px;
+        font-size: 10px; line-height: 1.5; white-space: nowrap;
+      }
+      .spectrum-tooltip b { color: #e6edf3; }
+
       /* ---- station DOM markers ---- */
       .station-marker {
         display: flex; align-items: center; gap: 4px;

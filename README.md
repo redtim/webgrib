@@ -109,6 +109,10 @@ gribwebview/
 │   │   ├── dap2.ts                     DAP2 binary (.dods) parser
 │   │   └── sfbofs.ts                   SFBOFS fetcher: OPeNDAP subsetting, cycle timing
 │   │
+│   ├── waves/                          ── NDBC buoy wave spectra ──
+│   │   ├── ndbc.ts                     realtime2 spectral file fetch (byte-ranged) + parse + merge
+│   │   └── spectrum.ts                 S(f,θ) reconstruction (Fourier / max entropy), watershed partitioning
+│   │
 │   ├── renderer/                       ── Visualization layers ──
 │   │   ├── index.ts                    Public exports
 │   │   ├── catalog.ts                  Declarative variable catalog (queries, colormaps, ranges)
@@ -138,10 +142,14 @@ gribwebview/
 │       ├── timeline.ts                 Cycle selector + forecast hour ticks
 │       ├── levelSlider.ts              Atmospheric level picker
 │       ├── legend.ts                   Colormap bar with unit-aware tick labels
+│       ├── tides.ts                    NOAA CO-OPS tide / current station overlays
+│       ├── waveBuoys.ts                NDBC wave buoy overlay: markers, hover, click → spectrum panel
+│       ├── spectrumPanel.ts            1-D spectrum, polar directional spectrum, swell/sea table
 │       └── units.ts                    Unit conversion system + localStorage persistence
 │
 ├── test/
 │   ├── smoke.test.ts                   E2E decode tests against live NOAA data
+│   ├── spectrum.test.ts                Wave spectrum reconstruction, partitioning and NDBC parsing
 │   └── lcc.test.ts                     LCC projection math tests
 │
 └── worker/                             Vite output directory for worker bundles
@@ -305,7 +313,7 @@ The San Francisco Bay Operational Forecast System (SFBOFS) is an FVCOM-based oce
 - **Forecast range**: 48 hours
 - **Subsetting**: The OPeNDAP constraint expression requests only surface-level (depth index 0) u/v current components plus coordinate arrays, reducing the download from ~68 MB to ~1.5 MB
 
-In development, requests go through Vite's proxy (`/ofs-proxy → opendap.co-ops.nos.noaa.gov`) to bypass CORS. In production, a Cloudflare Worker CORS proxy is used (configured via `VITE_OFS_PROXY_URL`).
+In development, requests go through Vite's proxy (`/ofs-proxy → opendap.co-ops.nos.noaa.gov`) to bypass CORS. In production, a Cloudflare Worker CORS proxy is used (configured via `VITE_OFS_PROXY_URL`). The same proxy fronts S3, NOMADS (RRFS) and NDBC (wave buoy spectra).
 
 ---
 
@@ -386,6 +394,16 @@ A Canvas 2D overlay that visualizes real-time lightning strikes from the Blitzor
 - Renders bolt-shaped markers with an age-based color gradient (white → yellow → orange → red → grey) and a radial glow effect for fresh strikes (< 5 seconds old)
 - Prunes strikes older than the configurable max age (default 10 minutes)
 - Supports `hitTest()` for click-to-inspect proximity detection
+
+#### Wave Spectra Buoys (`src/waves/`, `demo/waveBuoys.ts`, `demo/spectrumPanel.ts`)
+
+An overlay of the NDBC buoys that publish directional wave spectra (about 170). Clicking a buoy opens a panel with its last five days of hourly spectra:
+
+- **1-D energy spectrum** E(f) against period or frequency, with Hs = 4·√m0.
+- **Directional spectrum** S(f,θ) as a polar heatmap, rebuilt from the four directional moments the buoy reports (α1, α2, r1, r2). Two reconstructions are offered: NDBC's truncated two-harmonic Fourier series, `S = E(f)/π · [0.5 + r1·cos(θ−α1) + r2·cos(2(θ−α2))]`, and the Lygre–Krogstad (1986) maximum entropy closed form. Fourier can produce a spurious lobe opposite a narrow peak; MEM avoids that but can over-sharpen a broad sea, and sometimes splits into two lobes straddling the mean direction.
+- **Swell / wind sea partitions.** The grid is box-smoothed twice, a steepest-ascent watershed groups cells by the local maximum they climb to, neighbouring systems within 0.02 Hz and 35° are merged, and each system gets Hs, peak period and an energy-weighted mean direction (the direction waves come *from*). Peak frequency above 0.1 Hz is labelled wind sea; no wind data is used.
+
+Data access: NDBC serves no CORS headers, so the five per-buoy files (`.data_spec`, `.swdir`, `.swdir2`, `.swr1`, `.swr2`) go through the same proxy as OFS data (`/ofs-proxy/ndbc` in dev, `/ndbc/` on the worker, allow-listed to those files). The files are newest-first and about 1.5 MB each, so only the first 150 KB of each is fetched with a Range request; the proxy declines gzip because NDBC otherwise answers with the whole compressed file. Which buoys have spectra comes from scraping the `realtime2/` directory listing for `.data_spec` links, joined with `activestations.xml` for positions, since NDBC publishes no such flag.
 
 ---
 
@@ -485,6 +503,7 @@ User preferences persist to `localStorage` and are reactive — changing a unit 
 | **SFBOFS** | `opendap.co-ops.nos.noaa.gov` (via CORS proxy) | DAP2 binary | Regular lat/lon | 329x553 | Ocean surface currents (u/v) |
 | **CUDEM** | `noaa-nos-coastal-lidar-pds.s3.amazonaws.com` (build time only) | Cloud-optimized GeoTIFF | Regular lat/lon | 1/9 arc-second (~3 m), 20 tiles | Topobathy elevation → shoreline polygon |
 | **Lightning** | `wss://ws1.blitzortung.org/` | LZW-compressed JSON | Point data | Real-time | Strike lat/lon/time/polarity |
+| **NDBC** | `www.ndbc.noaa.gov/data/realtime2/` (via CORS proxy) | Text, `value (freq)` pairs | Buoy point data | Hourly, ~45 days | Wave energy spectrum E(f) + directional moments α1, α2, r1, r2 |
 | **Basemap** | OpenFreeMap | Vector tiles | — | — | Dark style map tiles |
 
 ---

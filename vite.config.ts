@@ -138,6 +138,14 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path: string) => path.replace(/^\/ofs-proxy\/s3/, ''),
       },
+      '/ofs-proxy/ndbc': {
+        target: 'https://www.ndbc.noaa.gov',
+        changeOrigin: true,
+        // NDBC answers a Range request with the whole gzipped file unless
+        // compression is declined; the worker does the same in production.
+        headers: { 'Accept-Encoding': 'identity' },
+        rewrite: (path: string) => path.replace(/^\/ofs-proxy\/ndbc/, ''),
+      },
     },
   },
   resolve: {
