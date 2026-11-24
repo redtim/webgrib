@@ -710,8 +710,14 @@ export class TideStationManager {
     });
 
     if (type === 'waterlevels') {
-      params.set('date', 'latest');
-      params.set('range', '24');
+      // date=latest ignores range and returns a single reading, so ask for a
+      // window that starts two calendar days back. begin_date is read in the
+      // station's own time zone, which can be a day behind the browser's, and
+      // the popup trims the series to the last 24 hours.
+      const start = new Date(Date.now() - 2 * 86_400_000);
+      const ymd = `${start.getFullYear()}${String(start.getMonth() + 1).padStart(2, '0')}${String(start.getDate()).padStart(2, '0')}`;
+      params.set('begin_date', ymd);
+      params.set('range', '72');
     } else {
       params.set('date', 'today');
       params.set('range', '48');
@@ -793,7 +799,11 @@ export class TideStationManager {
   // --------------------------------------------------------- render helpers
 
   private renderWaterLevel(el: HTMLElement, data: WaterLevelResponse, popupId: string, color: string): void {
-    const points = (data.data ?? []).filter((d) => d.v !== '');
+    const parsed = (data.data ?? [])
+      .map((d) => ({ t: d.t, ms: parseNoaaTime(d.t), v: parseFloat(d.v) }))
+      .filter((p) => Number.isFinite(p.ms) && Number.isFinite(p.v));
+    const lastMs = parsed.length ? parsed[parsed.length - 1]!.ms : 0;
+    const points = parsed.filter((p) => p.ms >= lastMs - 24 * 3_600_000);
     if (points.length === 0) {
       el.className = '';
       el.innerHTML = '<div class="inspect-row" style="color:#8b949e">No recent data</div>';
@@ -801,13 +811,13 @@ export class TideStationManager {
     }
 
     const latest = points[points.length - 1]!;
-    const level = parseFloat(latest.v);
+    const level = latest.v;
     const time = latest.t;
 
     // Determine trend from last two points
     let trend = '';
     if (points.length >= 2) {
-      const prev = parseFloat(points[points.length - 2]!.v);
+      const prev = points[points.length - 2]!.v;
       if (level > prev) trend = ' rising';
       else if (level < prev) trend = ' falling';
       else trend = ' steady';
@@ -822,9 +832,7 @@ export class TideStationManager {
 
     // Draw sparkline
     if (points.length > 1) {
-      const values = points.map((p) => parseFloat(p.v)).filter(Number.isFinite);
-      const times = points.map((p) => new Date(p.t).getTime()).filter(Number.isFinite);
-      this.drawSparkline(popupId, times, values, color);
+      this.drawSparkline(popupId, points.map((p) => p.ms), points.map((p) => p.v), color);
     }
   }
 
@@ -1187,6 +1195,16 @@ interface CurrentPredEntry {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Parse a CO-OPS "YYYY-MM-DD HH:mm" timestamp as browser-local time. The
+ * space-separated form is not one Date.parse must accept (Safari rejects it).
+ */
+function parseNoaaTime(t: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(t);
+  if (!m) return NaN;
+  return new Date(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!).getTime();
+}
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
