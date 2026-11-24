@@ -797,6 +797,7 @@ async function main(): Promise<void> {
         loadParticleOverlay(cycle, fhour, isStale),
         fetchAndShowIsobars(cycle, fhour, isStale),
       ]);
+      if (!isStale()) refreshInspect();
     } finally {
       easyUi.setBusy(--activeLoads > 0);
     }
@@ -1452,13 +1453,38 @@ async function main(): Promise<void> {
   // ---- click-to-inspect -----------------------------------------------------
 
   let popup: maplibregl.Popup | null = null;
+  // The point the open inspect popup describes, so it can be re-sampled when
+  // the map moves to another time; null when the popup is closed or belongs
+  // to something else (tide stations manage their own).
+  let inspectPoint: { lng: number; lat: number } | null = null;
   const showPopup = (lngLat: maplibregl.LngLat, html: string): void => {
     if (popup) popup.remove();
-    popup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' })
+    inspectPoint = null;
+    const p = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '280px' })
       .setLngLat(lngLat)
       .setHTML(html)
       .addTo(map);
+    p.on('close', () => { if (popup === p) inspectPoint = null; });
+    popup = p;
   };
+
+  /** Fill the open popup with the readout for a point at the map's current time. */
+  function renderInspect(lng: number, lat: number): void {
+    if (!popup) return;
+    const rows = (getUiMode() === 'easy' ? easyReadout : expertReadout)(lng, lat);
+    rows.push('<button class="forecast-btn">Forecast for this point</button>');
+    popup.setHTML(rows.join(''));
+    popup.getElement()?.querySelector('.forecast-btn')?.addEventListener('click', () => {
+      popup?.remove();
+      forecastPoint = { lng, lat };
+      void loadForecast();
+    });
+  }
+
+  /** Re-sample the open inspect popup after the layers change (time, level, layer). */
+  function refreshInspect(): void {
+    if (inspectPoint) renderInspect(inspectPoint.lng, inspectPoint.lat);
+  }
 
   // Wire popup callback for DOM marker clicks (water level / tide stations)
   tideManager?.setPopupCallback((lngLat, html) =>
@@ -1473,14 +1499,9 @@ async function main(): Promise<void> {
     }
 
     const { lng, lat } = ev.lngLat;
-    const rows = (getUiMode() === 'easy' ? easyReadout : expertReadout)(lng, lat);
-    rows.push('<button class="forecast-btn">Forecast for this point</button>');
-    showPopup(ev.lngLat, rows.join(''));
-    popup?.getElement()?.querySelector('.forecast-btn')?.addEventListener('click', () => {
-      popup?.remove();
-      forecastPoint = { lng, lat };
-      void loadForecast();
-    });
+    showPopup(ev.lngLat, '');
+    renderInspect(lng, lat);
+    inspectPoint = { lng, lat };
   });
 
   // ---- point forecast ---------------------------------------------------------
