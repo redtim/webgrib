@@ -427,20 +427,26 @@ export async function fetchSfbofsSurface(
 // ---------------------------------------------------------------------------
 // Water level (zeta) — THREDDS only
 //
-// zeta is the free-surface elevation in meters relative to the model's
-// mean-sea-level datum. It is 2D (time, ny, nx) in the regulargrid files.
+// zeta is the free-surface elevation in meters above mean sea level, and
+// zetatomllw the same surface above mean lower low water (the NOAA tide-gauge
+// and chart datum). Both are 2D (time, ny, nx) in the regulargrid files.
 // Byte offsets into the HDF5 file differ from u/v (no depth dimension), so
 // S3 range fetching would require a separate offset table — THREDDS is fine
 // for this secondary layer (~730 KB per file).
 // ---------------------------------------------------------------------------
 
-function zetaOpendapUrl(cycle: number, date: string, fhour: number): string {
+/** Vertical datum for SFBOFS water level: MSL (`zeta`) or MLLW (`zetatomllw`). */
+export type WaterLevelDatum = 'msl' | 'mllw';
+
+const ZETA_VAR: Record<WaterLevelDatum, string> = { msl: 'zeta', mllw: 'zetatomllw' };
+
+function zetaOpendapUrl(cycle: number, date: string, fhour: number, zVarName: string): string {
   const cc = String(cycle).padStart(2, '0');
   const fhhh = String(fhour).padStart(3, '0');
   const datePath = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6, 8)}`;
   const base = `${OFS_PROXY}/thredds/dodsC/NOAA/SFBOFS/MODELS/${datePath}/sfbofs.t${cc}z.${date}.regulargrid.f${fhhh}.nc`;
   const ce = [
-    `zeta[0:0][0:328][0:552]`,
+    `${zVarName}[0:0][0:328][0:552]`,
     `Latitude[0:328][0:552]`,
     `Longitude[0:328][0:552]`,
   ].join(',').replace(/\[/g, '%5B').replace(/\]/g, '%5D');
@@ -448,29 +454,31 @@ function zetaOpendapUrl(cycle: number, date: string, fhour: number): string {
 }
 
 /**
- * Fetch surface water-level (zeta) for a SFBOFS forecast step.
- * Values are meters relative to the model datum (positive = above MSL).
+ * Fetch surface water level for a SFBOFS forecast step, in meters above the
+ * requested datum (MSL by default).
  */
 export async function fetchSfbofsWaterLevel(
   cycle: number,
   date: string,
   fhour: number,
+  datum: WaterLevelDatum = 'msl',
 ): Promise<OfsScalarField> {
-  const cacheKey = `${cycle}:${date}:${fhour}`;
+  const cacheKey = `${datum}:${cycle}:${date}:${fhour}`;
   const cached = zetaCache.get(cacheKey);
   if (cached) return cached;
 
-  const resp = await fetch(zetaOpendapUrl(cycle, date, fhour));
-  if (!resp.ok) throw new Error(`SFBOFS zeta fetch failed: ${resp.status} ${resp.statusText}`);
+  const zName = ZETA_VAR[datum];
+  const resp = await fetch(zetaOpendapUrl(cycle, date, fhour, zName));
+  if (!resp.ok) throw new Error(`SFBOFS ${zName} fetch failed: ${resp.status} ${resp.statusText}`);
   const buffer = await resp.arrayBuffer();
 
-  const vars = parseDap2(buffer, ['zeta', 'Latitude', 'Longitude']);
-  const zVar = vars.get('zeta');
+  const vars = parseDap2(buffer, [zName, 'Latitude', 'Longitude']);
+  const zVar = vars.get(zName);
   const latVar = vars.get('Latitude');
   const lonVar = vars.get('Longitude');
   if (!zVar || !latVar || !lonVar) {
-    const missing = ['zeta', 'Latitude', 'Longitude'].filter((n) => !vars.has(n));
-    throw new Error(`SFBOFS zeta response missing variables: ${missing.join(', ')}`);
+    const missing = [zName, 'Latitude', 'Longitude'].filter((n) => !vars.has(n));
+    throw new Error(`SFBOFS ${zName} response missing variables: ${missing.join(', ')}`);
   }
 
   const ny = latVar.shape[0]!;

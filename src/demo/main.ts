@@ -80,6 +80,7 @@ function ensureWaterMask(): Promise<WaterMask | null> {
  * the gap between the model's coarse coast and the real one.
  */
 const OFS_FILL_PASSES = 4;
+const M_TO_FT = 3.28084;
 /** Same for the ~250 m bathymetry grid behind the water-depth layer (~500 m). */
 const DEPTH_FILL_PASSES = 2;
 
@@ -1040,12 +1041,15 @@ async function main(): Promise<void> {
 
     const { cycle, date, fhour } = ofsSchedule(timeline.validDate());
 
-    const [rawField, waterMask] = await Promise.all([fetchSfbofsWaterLevel(cycle, date, fhour), ensureWaterMask()]);
+    // MLLW in feet, the datum and unit the NOAA station markers use.
+    const [rawField, waterMask] = await Promise.all([fetchSfbofsWaterLevel(cycle, date, fhour, 'mllw'), ensureWaterMask()]);
     if (isStale()) return;
 
-    const field = waterMask
-      ? { ...rawField, values: fillMissingNearest(rawField.values, rawField.nx, rawField.ny, OFS_FILL_PASSES) }
-      : rawField;
+    const feet = rawField.values.map((v) => v * M_TO_FT);
+    const field = {
+      ...rawField,
+      values: waterMask ? fillMissingNearest(feet, rawField.nx, rawField.ny, OFS_FILL_PASSES) : feet,
+    };
     scalarLayer.setWaterMask(waterMask);
 
     let zMin = Infinity, zMax = -Infinity;

@@ -374,8 +374,10 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'sfbofs-water-level', group: 'Ocean', label: 'SF Bay Water Level', kind: 'scalar',
     source: 'ofs', ofsModel: 'sfbofs',
-    colormap: 'water-level', range: [-1.5, 1.5], dimension: 'none', unit: 'm',
-    format: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(2)} m`,
+    // Feet above MLLW, matching the NOAA station markers. The diverging
+    // colormap's white midpoint (3 ft) sits near mean sea level in the bay.
+    colormap: 'water-level', range: [-2, 8], dimension: 'none', unit: 'ft MLLW',
+    format: (v: number) => `${v.toFixed(1)} ft MLLW`,
     levels: [{ label: 'Surface' }],
   },
   {
