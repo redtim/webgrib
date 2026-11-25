@@ -97,6 +97,8 @@ export class TideStationManager {
     popupId: string;
     color: string;
     series: Array<{ t: number; v: number }>;
+    /** Observed water level readings, when the station has a gauge. */
+    obs?: TimedValue[];
     floodDir?: number;
     ebbDir?: number;
   } | null = null;
@@ -709,19 +711,8 @@ export class TideStationManager {
       format: 'json',
     });
 
-    if (type === 'waterlevels') {
-      // date=latest ignores range and returns a single reading, so ask for a
-      // window that starts two calendar days back. begin_date is read in the
-      // station's own time zone, which can be a day behind the browser's, and
-      // the popup trims the series to the last 24 hours.
-      const start = new Date(Date.now() - 2 * 86_400_000);
-      const ymd = `${start.getFullYear()}${String(start.getMonth() + 1).padStart(2, '0')}${String(start.getDate()).padStart(2, '0')}`;
-      params.set('begin_date', ymd);
-      params.set('range', '72');
-    } else {
-      params.set('date', 'today');
-      params.set('range', '48');
-    }
+    params.set('date', 'today');
+    params.set('range', '48');
 
     // Current predictions don't use datum
     if (type === 'currentpredictions') {
@@ -734,6 +725,60 @@ export class TideStationManager {
 
     this.dataCache.set(cacheKey, { data, fetchedAt: Date.now() });
     return data;
+  }
+
+  /**
+   * Fetch a 6-minute water level series (observed or NOAA-predicted) in feet
+   * above MLLW. Times are requested and parsed in GMT so the window doesn't
+   * depend on the station's or the browser's time zone. Returns [] when the
+   * station has no data for that product (e.g. a prediction-only station).
+   */
+  private async fetchWaterLevelSeries(
+    stationId: string,
+    product: 'water_level' | 'predictions',
+    startMs: number,
+    endMs: number,
+  ): Promise<TimedValue[]> {
+    // Round the window to 6 minutes so repeated popups share a cache entry.
+    const step = 6 * 60_000;
+    const begin = Math.floor(startMs / step) * step;
+    const end = Math.ceil(endMs / step) * step;
+    const cacheKey = `${product}:${stationId}:${begin}:${end}`;
+    const cached = this.dataCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < DATA_CACHE_TTL) return cached.data as TimedValue[];
+
+    const params = new URLSearchParams({
+      station: stationId,
+      product,
+      datum: 'MLLW',
+      time_zone: 'gmt',
+      units: 'english',
+      format: 'json',
+      begin_date: ymdhmUtc(begin),
+      end_date: ymdhmUtc(end),
+    });
+    if (product === 'predictions') params.set('interval', '6');
+
+    const resp = await fetch(`${DATA_BASE}?${params}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const json = await resp.json() as WaterLevelResponse & PredictionResponse;
+    const rows = product === 'water_level' ? json.data ?? [] : json.predictions ?? [];
+    const series = rows
+      .map((d) => ({ t: parseNoaaTimeUtc(d.t), v: d.v === '' ? NaN : parseFloat(d.v) }))
+      .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v));
+
+    this.dataCache.set(cacheKey, { data: series, fetchedAt: Date.now() });
+    return series;
+  }
+
+  /** Observed readings for the last `hours`, or [] if the station has no gauge. */
+  private async fetchObservations(stationId: string, hours: number): Promise<TimedValue[]> {
+    try {
+      const now = Date.now();
+      return await this.fetchWaterLevelSeries(stationId, 'water_level', now - hours * 3_600_000, now);
+    } catch {
+      return [];
+    }
   }
 
   /** Show a popup for a station clicked via a DOM marker. */
@@ -772,21 +817,21 @@ export class TideStationManager {
         return;
       }
 
+      if (type === 'waterlevels') {
+        await this.renderWaterLevelDetail(stationId, popupId, color);
+        return;
+      }
+
       if (type === 'currentpredictions' && stationType !== 'W') {
         await this.renderLocalCurrentPrediction(stationId, stationType, popupId, color);
         return;
       }
 
-      // Water levels (real-time) and W-type current stations fall through to NOAA API
+      // W-type current stations fall through to the NOAA API
       const data = await this.fetchStationData(type, stationId);
       const el = document.getElementById(popupId);
       if (!el) return;
-
-      if (type === 'waterlevels') {
-        this.renderWaterLevel(el, data as WaterLevelResponse, popupId, color);
-      } else {
-        this.renderCurrentPrediction(el, data as PredictionResponse, popupId, color);
-      }
+      this.renderCurrentPrediction(el, data as PredictionResponse, popupId, color);
     } catch (err) {
       const el = document.getElementById(popupId);
       if (el) {
@@ -798,42 +843,28 @@ export class TideStationManager {
 
   // --------------------------------------------------------- render helpers
 
-  private renderWaterLevel(el: HTMLElement, data: WaterLevelResponse, popupId: string, color: string): void {
-    const parsed = (data.data ?? [])
-      .map((d) => ({ t: d.t, ms: parseNoaaTime(d.t), v: parseFloat(d.v) }))
-      .filter((p) => Number.isFinite(p.ms) && Number.isFinite(p.v));
-    const lastMs = parsed.length ? parsed[parsed.length - 1]!.ms : 0;
-    const points = parsed.filter((p) => p.ms >= lastMs - 24 * 3_600_000);
-    if (points.length === 0) {
+  /**
+   * Water level station popup: the last 24 h of observed readings against
+   * NOAA's official predictions from 24 h back to 24 h ahead.
+   */
+  private async renderWaterLevelDetail(stationId: string, popupId: string, color: string): Promise<void> {
+    const now = Date.now();
+    const [obs, series] = await Promise.all([
+      this.fetchObservations(stationId, OBS_HOURS),
+      this.fetchWaterLevelSeries(stationId, 'predictions', now - OBS_HOURS * 3_600_000, now + 24 * 3_600_000)
+        .catch(() => [] as TimedValue[]),
+    ]);
+    const el = document.getElementById(popupId);
+    if (!el) return;
+
+    if (obs.length === 0 && series.length === 0) {
       el.className = '';
       el.innerHTML = '<div class="inspect-row" style="color:#8b949e">No recent data</div>';
       return;
     }
 
-    const latest = points[points.length - 1]!;
-    const level = latest.v;
-    const time = latest.t;
-
-    // Determine trend from last two points
-    let trend = '';
-    if (points.length >= 2) {
-      const prev = points[points.length - 2]!.v;
-      if (level > prev) trend = ' rising';
-      else if (level < prev) trend = ' falling';
-      else trend = ' steady';
-    }
-
-    el.className = '';
-    el.innerHTML = [
-      `<div class="inspect-row"><span class="k">level</span><span>${level.toFixed(2)} ft MLLW</span></div>`,
-      `<div class="inspect-row"><span class="k">trend</span><span>${trendArrow(trend)}${trend}</span></div>`,
-      `<div class="inspect-row"><span class="k">time</span><span>${escapeHtml(time)}</span></div>`,
-    ].join('');
-
-    // Draw sparkline
-    if (points.length > 1) {
-      this.drawSparkline(popupId, points.map((p) => p.ms), points.map((p) => p.v), color);
-    }
+    this.activePopup = { type: 'waterlevels', stationId, stationType: 'R', popupId, color, series, obs };
+    this.renderTidePopupContent(el, series, popupId, color, now, obs);
   }
 
   private async renderLocalTidePrediction(
@@ -846,10 +877,15 @@ export class TideStationManager {
     if (!el) return;
 
     const now = Date.now();
-    const start = new Date(now - 6 * 3600000);  // 6 hours ago
-    const end = new Date(now + 42 * 3600000);    // 42 hours ahead
+    const start = new Date(now - OBS_HOURS * 3600000); // back far enough to overlay observations
+    const end = new Date(now + 36 * 3600000);
 
-    const series = await generatePrediction(stationId, stationType, start, end, 6);
+    // Many reference stations also have a gauge; subordinate stations don't,
+    // and the observation fetch just comes back empty for those.
+    const [series, obs] = await Promise.all([
+      generatePrediction(stationId, stationType, start, end, 6),
+      stationType === 'R' ? this.fetchObservations(stationId, OBS_HOURS) : Promise.resolve([] as TimedValue[]),
+    ]);
     if (!document.getElementById(popupId)) return;
 
     if (series.length === 0) {
@@ -859,9 +895,9 @@ export class TideStationManager {
     }
 
     // Store for live updates when forecast time changes
-    this.activePopup = { type: 'tidepredictions', stationId, stationType, popupId, color, series };
+    this.activePopup = { type: 'tidepredictions', stationId, stationType, popupId, color, series, obs };
 
-    this.renderTidePopupContent(el, series, popupId, color, now);
+    this.renderTidePopupContent(el, series, popupId, color, now, obs);
   }
 
   private async renderLocalCurrentPrediction(
@@ -901,30 +937,65 @@ export class TideStationManager {
     popupId: string,
     color: string,
     nowMs: number,
+    obs: TimedValue[] = [],
   ): void {
-    const currentLevel = interpolateAtTime(series, nowMs);
-    const nextHigh = findNextExtreme(series, nowMs, 'high');
-    const nextLow = findNextExtreme(series, nowMs, 'low');
-
+    const row = (k: string, v: string): string =>
+      `<div class="inspect-row"><span class="k">${k}</span><span>${v}</span></div>`;
     const rows: string[] = [];
-    if (currentLevel !== null) {
-      rows.push(`<div class="inspect-row"><span class="k">now (${formatTime(nowMs)})</span><span>${currentLevel.toFixed(2)} ft MLLW</span></div>`);
-    }
     const fcMs = this.forecastDate.getTime();
-    if (Math.abs(fcMs - nowMs) > 30 * 60000) {
+
+    // Observed vs predicted at the latest reading. The residual (storm surge,
+    // river runoff, wind setup) is what the harmonic prediction can't know.
+    let residual: number | null = null;
+    const latest = obs.length ? obs[obs.length - 1]! : null;
+    if (latest) {
+      const prev = obs.length >= 2 ? obs[obs.length - 2]!.v : latest.v;
+      const trend = latest.v > prev ? ' rising' : latest.v < prev ? ' falling' : ' steady';
+      rows.push(row(`observed (${formatTime(latest.t)})`, `${trendArrow(trend)}${latest.v.toFixed(2)} ft MLLW`));
+      const predAtObs = series.length && latest.t >= series[0]!.t && latest.t <= series[series.length - 1]!.t
+        ? interpolateAtTime(series, latest.t) : null;
+      if (predAtObs !== null) {
+        residual = latest.v - predAtObs;
+        rows.push(row('predicted', `${predAtObs.toFixed(2)} ft`));
+        rows.push(row('obs − pred', `<span style="color:${residualColor(residual)}">${signed(residual)} ft</span>`));
+      }
+    } else {
+      const currentLevel = interpolateAtTime(series, nowMs);
+      if (currentLevel !== null) rows.push(row(`now (${formatTime(nowMs)})`, `${currentLevel.toFixed(2)} ft MLLW`));
+    }
+
+    if (Math.abs(fcMs - nowMs) > 30 * 60000 && series.length
+        && fcMs >= series[0]!.t && fcMs <= series[series.length - 1]!.t) {
       const fcLevel = interpolateAtTime(series, fcMs);
       if (fcLevel !== null) {
-        rows.push(`<div class="inspect-row"><span class="k">@ ${formatTime(fcMs)}</span><span>${fcLevel.toFixed(2)} ft MLLW</span></div>`);
+        // Carry the current residual forward as a rough adjustment, the way a
+        // navigator would; it decays in reality, so only show it near-term.
+        const adj = residual !== null && fcMs > nowMs && fcMs - nowMs < 12 * 3_600_000 && Math.abs(residual) >= 0.1
+          ? ` <span style="color:#8b949e">(${(fcLevel + residual).toFixed(2)} w/ residual)</span>` : '';
+        rows.push(row(`pred @ ${formatTime(fcMs)}`, `${fcLevel.toFixed(2)} ft${adj}`));
       }
     }
-    if (nextHigh) rows.push(`<div class="inspect-row"><span class="k">next high</span><span>${nextHigh.v.toFixed(2)} ft @ ${formatTime(nextHigh.t)}</span></div>`);
-    if (nextLow) rows.push(`<div class="inspect-row"><span class="k">next low</span><span>${nextLow.v.toFixed(2)} ft @ ${formatTime(nextLow.t)}</span></div>`);
+
+    // Upcoming highs and lows, like the CO-OPS tide table.
+    const extremes = findExtremes(series, nowMs, 4);
+    if (extremes.length) {
+      rows.push('<div class="tide-hilo">' + extremes.map((e) =>
+        `<span class="tide-hilo-k" style="color:${e.kind === 'H' ? '#7ee787' : '#ff7b72'}">${e.kind === 'H' ? 'high' : 'low'}</span>`
+        + `<span>${formatDayTime(e.t, nowMs)}</span><span class="tide-hilo-v">${e.v.toFixed(2)} ft</span>`,
+      ).join('') + '</div>');
+    }
+
+    const swatch = (c: string, label: string): string =>
+      `<span class="tide-legend-item"><span style="background:${c}"></span>${label}</span>`;
+    rows.push(`<div class="tide-legend">${swatch(color, 'predicted')}`
+      + (obs.length > 1 ? `${swatch('#ff7b72', 'observed')}${swatch('#f0c040', 'obs \u2212 pred')}` : '')
+      + '</div>');
 
     el.className = '';
     el.innerHTML = rows.join('');
 
-    if (series.length > 1) {
-      this.drawSparkline(popupId, series.map((p) => p.t), series.map((p) => p.v), color, nowMs, fcMs);
+    if (series.length > 1 || obs.length > 1) {
+      this.drawTideChart(popupId, series, obs, color, nowMs, fcMs);
     }
   }
 
@@ -977,8 +1048,8 @@ export class TideStationManager {
     if (!el) { this.activePopup = null; return; }
 
     const now = Date.now();
-    if (p.type === 'tidepredictions') {
-      this.renderTidePopupContent(el, p.series, p.popupId, p.color, now);
+    if (p.type === 'tidepredictions' || p.type === 'waterlevels') {
+      this.renderTidePopupContent(el, p.series, p.popupId, p.color, now, p.obs);
     } else if (p.type === 'currentpredictions') {
       this.renderCurrentPopupContent(el, p.series, p.popupId, p.color, now, p.floodDir ?? 0, p.ebbDir ?? 180);
     }
@@ -1040,6 +1111,152 @@ export class TideStationManager {
     el.innerHTML = rows.join('');
 
     this.drawSparkline(popupId, curve.map((p) => p.t), curve.map((p) => p.v), color, now);
+  }
+
+  // ------------------------------------------------------------ tide chart
+
+  /**
+   * Predicted vs observed water level chart, modelled on the CO-OPS water
+   * level page: predicted curve, observed readings on top, and a residual
+   * strip (observed − predicted) underneath. Drawn at device resolution.
+   */
+  private drawTideChart(
+    popupId: string,
+    pred: TimedValue[],
+    obs: TimedValue[],
+    color: string,
+    nowMs: number,
+    forecastMs: number,
+  ): void {
+    const canvas = document.getElementById(`${popupId}-canvas`) as HTMLCanvasElement | null;
+    if (!canvas) return;
+    const cssW = 240;
+    const hasObs = obs.length > 1;
+    const cssH = hasObs ? 132 : 92;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    canvas.style.display = 'block';
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const OBS_COLOR = '#ff7b72';
+    const RES_COLOR = '#f0c040';
+    const pad = { top: 14, right: 6, left: 28 };
+    const axisH = 12;
+    const resH = hasObs ? 30 : 0;
+    const gap = hasObs ? 6 : 0;
+    const mainH = cssH - pad.top - axisH - resH - gap;
+    const pw = cssW - pad.left - pad.right;
+
+    const all = [...pred, ...obs];
+    const tMin = Math.min(pred[0]?.t ?? Infinity, obs[0]?.t ?? Infinity);
+    const tMax = Math.max(pred[pred.length - 1]?.t ?? -Infinity, obs[obs.length - 1]?.t ?? -Infinity);
+    const tRange = tMax - tMin || 1;
+    let vMin = Infinity, vMax = -Infinity;
+    for (const p of all) { if (p.v < vMin) vMin = p.v; if (p.v > vMax) vMax = p.v; }
+    const vPad = (vMax - vMin) * 0.08 || 0.5;
+    vMin -= vPad; vMax += vPad;
+    const vRange = vMax - vMin || 1;
+
+    const toX = (t: number): number => pad.left + ((t - tMin) / tRange) * pw;
+    const toY = (v: number): number => pad.top + mainH - ((v - vMin) / vRange) * mainH;
+    const mainBottom = pad.top + mainH;
+
+    ctx.font = '8px ui-monospace, monospace';
+
+    // Horizontal grid at whole feet (or 2 ft steps for big ranges)
+    const stepFt = vRange > 8 ? 2 : 1;
+    ctx.textAlign = 'right';
+    for (let v = Math.ceil(vMin / stepFt) * stepFt; v <= vMax; v += stepFt) {
+      const y = toY(v);
+      ctx.strokeStyle = v === 0 ? 'rgba(139,148,158,0.45)' : 'rgba(139,148,158,0.15)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(cssW - pad.right, y); ctx.stroke();
+      ctx.fillStyle = '#8b949e';
+      ctx.fillText(`${v}`, pad.left - 3, y + 3);
+    }
+    ctx.fillText('ft', pad.left - 3, pad.top - 5);
+
+    // Vertical grid + labels every 6 h on local clock hours, midnight emphasised
+    const tick = new Date(tMin);
+    tick.setMinutes(0, 0, 0);
+    while (tick.getTime() < tMin || tick.getHours() % 6 !== 0) tick.setHours(tick.getHours() + 1);
+    ctx.textAlign = 'center';
+    // setHours steps on the local clock, so ticks stay on 00/06/12/18 across DST
+    for (; tick.getTime() <= tMax; tick.setHours(tick.getHours() + 6)) {
+      const x = toX(tick.getTime());
+      const midnight = tick.getHours() === 0;
+      ctx.strokeStyle = midnight ? 'rgba(139,148,158,0.35)' : 'rgba(139,148,158,0.12)';
+      ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, mainBottom + gap + resH); ctx.stroke();
+      ctx.fillStyle = midnight ? '#c9d1d9' : '#8b949e';
+      const label = midnight
+        ? tick.toLocaleDateString(undefined, { weekday: 'short' })
+        : formatHour(tick.getHours());
+      ctx.fillText(label, x, cssH - 2);
+    }
+
+    // Predicted curve
+    if (pred.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(toX(pred[0]!.t), mainBottom);
+      for (const p of pred) ctx.lineTo(toX(p.t), toY(p.v));
+      ctx.lineTo(toX(pred[pred.length - 1]!.t), mainBottom);
+      ctx.closePath();
+      ctx.fillStyle = hexToRgba(color, 0.1);
+      ctx.fill();
+      strokeSeries(ctx, pred, toX, toY, color, 1.5);
+    }
+
+    // Observed readings
+    if (hasObs) strokeSeries(ctx, obs, toX, toY, OBS_COLOR, 1.5);
+
+    // Residual strip
+    if (hasObs && pred.length > 1) {
+      const resTop = mainBottom + gap;
+      const res: TimedValue[] = [];
+      for (const o of obs) {
+        if (o.t < pred[0]!.t || o.t > pred[pred.length - 1]!.t) continue;
+        const p = interpolateAtTime(pred, o.t);
+        if (p !== null) res.push({ t: o.t, v: o.v - p });
+      }
+      let rAbs = 0.5;
+      for (const r of res) rAbs = Math.max(rAbs, Math.abs(r.v));
+      rAbs *= 1.1;
+      const toYr = (v: number): number => resTop + resH / 2 - (v / rAbs) * (resH / 2);
+      ctx.fillStyle = 'rgba(22,27,34,0.6)';
+      ctx.fillRect(pad.left, resTop, pw, resH);
+      ctx.strokeStyle = 'rgba(139,148,158,0.45)';
+      ctx.beginPath(); ctx.moveTo(pad.left, toYr(0)); ctx.lineTo(cssW - pad.right, toYr(0)); ctx.stroke();
+      if (res.length > 1) strokeSeries(ctx, res, toX, toYr, RES_COLOR, 1.2);
+      ctx.fillStyle = '#8b949e';
+      ctx.textAlign = 'right';
+      ctx.fillText(`+${rAbs.toFixed(1)}`, pad.left - 3, resTop + 7);
+      ctx.fillText(`−${rAbs.toFixed(1)}`, pad.left - 3, resTop + resH);
+    }
+
+    // Now / forecast markers
+    const marker = (t: number, stroke: string, label: string, labelColor: string): void => {
+      if (t < tMin || t > tMax) return;
+      const x = toX(t);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, mainBottom + gap + resH); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = labelColor;
+      ctx.textAlign = 'center';
+      ctx.fillText(label, x, pad.top - 4);
+    };
+    marker(nowMs, 'rgba(255,255,255,0.6)', 'now', '#ffffff');
+    if (Math.abs(forecastMs - nowMs) > 30 * 60000) {
+      marker(forecastMs, 'rgba(126,231,135,0.6)', 'fcst', '#7ee787');
+    }
+
   }
 
   // ------------------------------------------------------------ sparkline
@@ -1196,14 +1413,66 @@ interface CurrentPredEntry {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Hours of observed readings shown in water level popups. */
+const OBS_HOURS = 24;
+
 /**
- * Parse a CO-OPS "YYYY-MM-DD HH:mm" timestamp as browser-local time. The
- * space-separated form is not one Date.parse must accept (Safari rejects it).
+ * Parse a CO-OPS "YYYY-MM-DD HH:mm" timestamp requested with time_zone=gmt.
+ * The space-separated form is not one Date.parse must accept (Safari rejects it).
  */
-function parseNoaaTime(t: string): number {
+function parseNoaaTimeUtc(t: string): number {
   const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(t);
   if (!m) return NaN;
-  return new Date(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!).getTime();
+  return Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!);
+}
+
+/** Format a time as the "yyyyMMdd HH:mm" UTC form CO-OPS begin/end_date take. */
+function ymdhmUtc(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+function signed(v: number): string {
+  return `${v >= 0 ? '+' : '\u2212'}${Math.abs(v).toFixed(2)}`;
+}
+
+/** Grey when the residual is within normal noise, amber/red as it grows. */
+function residualColor(v: number): string {
+  const a = Math.abs(v);
+  return a < 0.25 ? '#c9d1d9' : a < 0.75 ? '#f0c040' : '#ff7b72';
+}
+
+function formatHour(h: number): string {
+  return h === 12 ? '12p' : h > 12 ? `${h - 12}p` : `${h}a`;
+}
+
+/** Time of day, prefixed with the weekday when it isn't today. */
+function formatDayTime(ms: number, nowMs: number): string {
+  const d = new Date(ms);
+  const sameDay = d.toDateString() === new Date(nowMs).toDateString();
+  return sameDay ? formatTime(ms) : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${formatTime(ms)}`;
+}
+
+/** Draw a series as a line, breaking it across data gaps longer than 20 minutes. */
+function strokeSeries(
+  ctx: CanvasRenderingContext2D,
+  data: TimedValue[],
+  toX: (t: number) => number,
+  toY: (v: number) => number,
+  color: string,
+  width: number,
+): void {
+  ctx.beginPath();
+  for (let i = 0; i < data.length; i++) {
+    const p = data[i]!;
+    const gap = i > 0 && p.t - data[i - 1]!.t > 20 * 60_000;
+    if (i === 0 || gap) ctx.moveTo(toX(p.t), toY(p.v));
+    else ctx.lineTo(toX(p.t), toY(p.v));
+  }
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.stroke();
 }
 
 function escapeHtml(s: string): string {
@@ -1238,21 +1507,23 @@ function hexToRgba(hex: string, alpha: number): string {
 
 interface TimedValue { t: number; v: number }
 
-function findNextExtreme(
+/** The next `count` highs and lows in a regularly sampled series after `nowMs`. */
+function findExtremes(
   data: TimedValue[],
   nowMs: number,
-  type: 'high' | 'low',
-): TimedValue | null {
-  // Look for local extremes after now
-  for (let i = 1; i < data.length - 1; i++) {
+  count: number,
+): Array<TimedValue & { kind: 'H' | 'L' }> {
+  const out: Array<TimedValue & { kind: 'H' | 'L' }> = [];
+  for (let i = 1; i < data.length - 1 && out.length < count; i++) {
     if (data[i]!.t < nowMs) continue;
     const prev = data[i - 1]!.v;
     const curr = data[i]!.v;
     const next = data[i + 1]!.v;
-    if (type === 'high' && curr > prev && curr > next) return data[i]!;
-    if (type === 'low' && curr < prev && curr < next) return data[i]!;
+    // >= on one side so a flat top of two equal samples counts once
+    if (curr > prev && curr >= next) out.push({ ...data[i]!, kind: 'H' });
+    else if (curr < prev && curr <= next) out.push({ ...data[i]!, kind: 'L' });
   }
-  return null;
+  return out;
 }
 
 function interpolateAtTime(data: TimedValue[], nowMs: number): number | null {
