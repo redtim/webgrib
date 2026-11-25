@@ -12,3 +12,7 @@ coverage
 test/fixtures/*.grib2
 test/fixtures/*.idx
 .wrangler
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/
