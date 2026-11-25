@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>webgrib radar</title>
+    <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>
+      html, body, #map { margin: 0; height: 100%; background: #0b0d10; }
+      #panel {
+        position: absolute; top: 12px; left: 12px; width: 260px; padding: 12px;
+        background: rgba(11, 13, 16, 0.88); color: #e6edf3;
+        border: 1px solid rgba(110, 118, 129, 0.35); border-radius: 8px;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .row { display: flex; gap: 6px; align-items: center; }
+      #modes { margin-bottom: 8px; }
+      #modes button { flex: 1; }
+      body.archive #count { display: none; }
+      select, button, input[type="date"], input[type="time"] {
+        font: inherit; color-scheme: dark; color: inherit; background: #161b22; cursor: pointer;
+        border: 1px solid #30363d; border-radius: 4px; padding: 5px 8px;
+      }
+      select { flex: 1; }
+      button[aria-pressed="true"] { background: rgba(56, 139, 253, 0.25); border-color: #58a6ff; color: #58a6ff; }
+      button:disabled, input:disabled { opacity: 0.4; cursor: default; }
+      #status { margin: 10px 0; min-height: 2.8em; white-space: pre-line; line-height: 1.4; }
+      #play { width: 36px; }
+      #scrub { flex: 1; min-width: 0; accent-color: #58a6ff; }
+      #count { flex: none; }
+      #progress { margin: 4px 0 10px; min-height: 1.4em; color: #8b949e; font-size: 11px; }
+      #legend { display: block; width: 100%; height: 10px; border-radius: 2px; }
+      #legend-labels { display: flex; justify-content: space-between; margin-top: 4px; color: #8b949e; font-size: 11px; }
+      #legend-labels i { display: inline-block; width: 8px; height: 8px; margin-right: 3px; }
+
+      /* Sits above the map attribution, which must stay visible. */
+      #archive {
+        position: absolute; left: 12px; right: 12px; bottom: 36px; padding: 10px 14px;
+        background: rgba(11, 13, 16, 0.9); color: #e6edf3;
+        border: 1px solid rgba(110, 118, 129, 0.35); border-radius: 8px;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #archive[hidden] { display: none; }
+      #archive .row { flex-wrap: wrap; }
+      input[type="date"], input[type="time"] { cursor: text; }
+      #activity-label { margin-left: auto; color: #8b949e; font-size: 11px; }
+      #timeline { margin: 10px 6px 8px; }
+      .track { position: relative; height: 46px; touch-action: none; cursor: crosshair; border-bottom: 1px solid #30363d; }
+      .track canvas { display: block; width: 100%; height: 46px; pointer-events: none; }
+      .selection {
+        position: absolute; top: 0; bottom: 0; pointer-events: none;
+        background: rgba(56, 139, 253, 0.18);
+      }
+      .handle {
+        position: absolute; top: -4px; bottom: -4px; width: 12px; margin-left: -6px;
+        cursor: ew-resize; touch-action: none;
+      }
+      .handle[hidden] { display: none; }
+      .handle::after {
+        content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 4px;
+        border-radius: 2px; background: #58a6ff;
+      }
+      .handle:focus-visible { outline: 2px solid #e6edf3; border-radius: 3px; }
+      .ticks { position: relative; height: 14px; color: #8b949e; font-size: 10px; }
+      .ticks span { position: absolute; top: 2px; transform: translateX(-50%); }
+      .ticks span:first-child { transform: none; }
+      #summary { flex: 1 1 180px; line-height: 1.4; }
+      #summary.warning { color: #e3b341; }
+      #load { min-width: 70px; }
+      /* The map attribution wraps to two lines on a phone. */
+      @media (max-width: 600px) { #archive { bottom: 60px; } }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="panel">
+      <div class="row" id="modes">
+        <button type="button" data-mode="live" aria-pressed="true">Live</button>
+        <button type="button" data-mode="archive" aria-pressed="false">Archive</button>
+      </div>
+      <div class="row">
+        <select id="site" aria-label="Radar site"></select>
+        <button type="button" data-product="REF" aria-pressed="true">REF</button>
+        <button type="button" data-product="VEL" aria-pressed="false">VEL</button>
+      </div>
+      <div id="status">Loading…</div>
+      <div class="row">
+        <button type="button" id="play" aria-label="Play" disabled>▶</button>
+        <input type="range" id="scrub" aria-label="Frame" min="0" max="0" value="0" disabled />
+        <select id="count" aria-label="Loop length">
+          <option value="1">1 scan</option>
+          <option value="6">6 scans</option>
+          <option value="10" selected>10 scans</option>
+          <option value="20">20 scans</option>
+        </select>
+      </div>
+      <div id="progress"></div>
+      <canvas id="legend" width="236" height="10"></canvas>
+      <div id="legend-labels"></div>
+    </div>
+    <div id="archive" hidden>
+      <div class="row">
+        <button type="button" id="prev-day" aria-label="Previous day">‹</button>
+        <input type="date" id="date" aria-label="Date" />
+        <button type="button" id="next-day" aria-label="Next day">›</button>
+        <button type="button" data-zone="local" aria-pressed="true">Local</button>
+        <button type="button" data-zone="utc" aria-pressed="false">UTC</button>
+        <span id="activity-label">activity (from file size)</span>
+      </div>
+      <div id="timeline"></div>
+      <div class="row">
+        <label>From <input type="time" id="from" /></label>
+        <label><span id="to-label">To</span> <input type="time" id="to" /></label>
+        <span id="summary" role="status"></span>
+        <button type="button" id="load" disabled>Load</button>
+      </div>
+    </div>
+    <script type="module" src="/src/radar/main.ts"></script>
+  </body>
+</html>
