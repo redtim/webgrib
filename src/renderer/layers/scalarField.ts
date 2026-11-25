@@ -53,6 +53,7 @@ ${LCC_GLSL}
 uniform sampler2D uField;
 uniform sampler2D uLut;
 uniform vec2      uValueRange;
+uniform float     uStep;
 uniform float     uOpacity;
 
 in  vec2 vMercator;
@@ -74,6 +75,8 @@ void main() {
 
   float v = texture(uField, uv).r;
   if (isnan(v)) discard;
+  // Discrete bands: snap to the nearest multiple of uStep (0 = continuous).
+  if (uStep > 0.0) v = round(v / uStep) * uStep;
 
   float t = (v - uValueRange.x) / max(1e-8, uValueRange.y - uValueRange.x);
   t = clamp(t, 0.0, 1.0);
@@ -90,6 +93,7 @@ ${WATER_MASK_GLSL}
 uniform sampler2D uField;
 uniform sampler2D uLut;
 uniform vec2      uValueRange;
+uniform float     uStep;
 uniform float     uOpacity;
 
 in  vec2 vMercator;
@@ -109,6 +113,8 @@ void main() {
 
   float v = texture(uField, uv).r;
   if (isnan(v)) discard;
+  // Discrete bands: snap to the nearest multiple of uStep (0 = continuous).
+  if (uStep > 0.0) v = round(v / uStep) * uStep;
 
   float mask = waterMaskAlpha();
   if (mask <= 0.0) discard;
@@ -171,6 +177,7 @@ export class ScalarFieldLayer implements CustomLayerInterface {
   private fieldNy = 0;
 
   private valueRange: [number, number] = [0, 1];
+  private valueStep = 0;
   private opacity: number;
   private cmapName: ColormapName;
   private meshRes: number;
@@ -364,6 +371,8 @@ export class ScalarFieldLayer implements CustomLayerInterface {
 
   setOpacity(op: number): void { this.opacity = op; this.map?.triggerRepaint(); }
   setValueRange(range: [number, number]): void { this.valueRange = range; this.map?.triggerRepaint(); }
+  /** Draw discrete color bands this wide, in data units (0 = continuous ramp). */
+  setValueStep(step: number): void { this.valueStep = step; this.map?.triggerRepaint(); }
 
   setVisible(visible: boolean): void {
     this.visible = visible;
@@ -445,6 +454,7 @@ export class ScalarFieldLayer implements CustomLayerInterface {
 
     gl.uniformMatrix4fv(this.uloc(prog,'uMatrix'), false, matrix as Float32Array);
     gl.uniform2f(this.uloc(prog,'uValueRange'), this.valueRange[0], this.valueRange[1]);
+    gl.uniform1f(this.uloc(prog,'uStep'), this.valueStep);
     gl.uniform1f(this.uloc(prog,'uOpacity'), this.opacity);
 
     if (useLatLon) {

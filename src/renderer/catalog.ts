@@ -57,6 +57,8 @@ export interface CatalogVariable {
   colormap?: ColormapName;
   /** Fixed range in native units (K for temp, m/s for speed, etc.). */
   range?: [number, number];
+  /** Draw the fill in discrete color bands this wide, in the units the field is drawn in; unset = smooth ramp. */
+  step?: number;
   /** Physical dimension — drives unit conversion. */
   dimension?: Dimension | 'percent' | 'none';
   /** Legacy display unit string (used as fallback when dimension is not set). */
@@ -374,9 +376,10 @@ export const CATALOG: CatalogVariable[] = [
   {
     id: 'sfbofs-water-level', group: 'Ocean', label: 'SF Bay Water Level', kind: 'scalar',
     source: 'ofs', ofsModel: 'sfbofs',
-    // Feet above MLLW, matching the NOAA station markers. The diverging
-    // colormap's white midpoint (3 ft) sits near mean sea level in the bay.
-    colormap: 'water-level', range: [-2, 8], dimension: 'none', unit: 'ft MLLW',
+    // Feet above MLLW, matching the NOAA station markers. The colormap's
+    // white point is pinned at 3 ft (near mean sea level in the bay); the top
+    // reaches 14 ft for king tides and storm surge in the South Bay and Delta.
+    colormap: 'water-level', range: [-2, 14], step: 0.1, dimension: 'none', unit: 'ft MLLW',
     format: (v: number) => `${v.toFixed(1)} ft MLLW`,
     levels: [{ label: 'Surface' }],
   },

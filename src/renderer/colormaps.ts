@@ -60,7 +60,7 @@ export function colormap(name: ColormapName): Uint8Array {
       lut[3] = 0; // index 0 (no current) = fully transparent
       return lut;
     }
-    case 'water-level': return buildFromStops(WATER_LEVEL_STOPS);
+    case 'water-level': return buildFromPositionedStops(WATER_LEVEL_STOPS);
     case 'bathymetry': {
       const lut = buildFromPositionedStops(BATHYMETRY_STOPS);
       lut[3] = 0; // index 0 (zero depth / dry) = fully transparent
@@ -210,11 +210,18 @@ const OCEAN_CURRENT_STOPS: Array<[number, number, number]> = [
   [40, 180, 140], [100, 200, 80], [200, 220, 50],
   [240, 180, 40], [255, 120, 30],
 ];
-// Water-level anomaly (diverging around 0): deep blue (ebb) → white → deep red (flood)
-const WATER_LEVEL_STOPS: Array<[number, number, number]> = [
-  [15, 40, 120], [60, 110, 180], [150, 190, 230],
-  [245, 245, 245],
-  [250, 180, 140], [220, 90, 70], [130, 20, 30],
+// Water level, ft MLLW over a −2…14 range: deep blue (low) → white at 3 ft
+// (≈ mean sea level in the bay) → reds (high) → dark maroon for 12+ ft
+// extremes. Positions are (ft + 2) / 16.
+const WATER_LEVEL_STOPS: Array<{ t: number; rgb: [number, number, number] }> = [
+  { t: 0.0000, rgb: [15, 40, 120] },    // −2 ft
+  { t: 0.1042, rgb: [60, 110, 180] },   // −0.33 ft
+  { t: 0.2083, rgb: [150, 190, 230] },  // 1.33 ft
+  { t: 0.3125, rgb: [245, 245, 245] },  // 3 ft
+  { t: 0.5000, rgb: [250, 180, 140] },  // 6 ft
+  { t: 0.6875, rgb: [220, 90, 70] },    // 9 ft
+  { t: 0.8750, rgb: [130, 20, 30] },    // 12 ft
+  { t: 1.0000, rgb: [60, 0, 50] },      // 14 ft
 ];
 // Bathymetric depth over a 0–100 m value range with nonlinear resolution.
 // Every 0.5 ft (0.1524 m) gets its own color stop between 0–3 m, using a

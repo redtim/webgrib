@@ -48,9 +48,10 @@ export class Legend {
     dataMax: number,
     unit: string,
     ticks?: LegendTick[],
+    step = 0,
   ): void {
     this.container.style.display = '';
-    const rgba = colormap(cmap);
+    const rgba = step > 0 ? stepped(colormap(cmap), dataMin, dataMax, step) : colormap(cmap);
     const ctx = this.canvas.getContext('2d')!;
     const img = ctx.createImageData(256, 1);
     img.data.set(rgba);
@@ -118,4 +119,17 @@ function formatLegendValue(v: number): string {
   if (Math.abs(v) >= 1000) return v.toFixed(0);
   if (Math.abs(v) >= 1) return v.toFixed(1);
   return v.toPrecision(2);
+}
+
+/** Resample a 256-entry LUT into flat bands of `step` data units, matching the fill shader. */
+function stepped(lut: Uint8Array, min: number, max: number, step: number): Uint8Array {
+  const out = new Uint8Array(lut.length);
+  const span = max - min;
+  for (let i = 0; i < 256; i++) {
+    const v = Math.round((min + (i / 255) * span) / step) * step;
+    const t = Math.min(1, Math.max(0, span > 0 ? (v - min) / span : 0));
+    const j = Math.round(t * 255) * 4;
+    out.set(lut.subarray(j, j + 4), i * 4);
+  }
+  return out;
 }

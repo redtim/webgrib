@@ -771,7 +771,7 @@ async function main(): Promise<void> {
       legend.update('wind', ...windLegendArgs());
     } else {
       const dr = displayRange(currentVariable);
-      legend.update(currentVariable.colormap, dr[0], dr[1], displayUnit(currentVariable));
+      legend.update(currentVariable.colormap, dr[0], dr[1], displayUnit(currentVariable), undefined, currentVariable.step);
     }
   }
   onUnitChange(refreshLegend);
@@ -816,6 +816,7 @@ async function main(): Promise<void> {
     const isStale = () => gen !== loadGen;
 
     currentVariable = variable;
+    scalarLayer.setValueStep(variable.step ?? 0);
     panel.setActive(variable.id);
     easyUi.setActive(variable);
 
@@ -1079,7 +1080,7 @@ async function main(): Promise<void> {
     hideFillParticles();
 
     if (variable.colormap && variable.range) {
-      legend.update(variable.colormap, variable.range[0], variable.range[1], variable.unit ?? 'm');
+      legend.update(variable.colormap, variable.range[0], variable.range[1], variable.unit ?? 'm', undefined, variable.step);
     }
 
     if (lastFitVariable !== variable.id) {
@@ -1131,7 +1132,7 @@ async function main(): Promise<void> {
     hideFillParticles();
 
     if (variable.colormap && variable.range) {
-      legend.update(variable.colormap, variable.range[0], variable.range[1], variable.unit ?? 'm');
+      legend.update(variable.colormap, variable.range[0], variable.range[1], variable.unit ?? 'm', undefined, variable.step);
     }
 
     if (lastFitVariable !== variable.id) {
